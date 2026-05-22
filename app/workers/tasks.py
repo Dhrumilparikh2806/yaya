@@ -186,8 +186,57 @@ def process_file(self, job_id: str):
                 )
 
 
-# ── RAGAS evaluation task (stub — implemented Day 7) ──────────────────────────
+# ── RAGAS evaluation task ─────────────────────────────────────────────────────
 
 @celery_app.task(bind=True, max_retries=2)
 def compute_ragas(self, query_history_id: str):
-    pass
+    from app.config import settings
+    from app.models.db import QueryHistory
+
+    with Session(get_engine()) as db:
+        qh = db.get(QueryHistory, uuid.UUID(query_history_id))
+        if not qh:
+            log.error("compute_ragas_not_found", query_history_id=query_history_id)
+            return
+
+        try:
+            from app.evaluation.ragas_eval import compute_ragas_scores
+            from app.rag.embedder import embed_query
+            from app.rag.vectorstore import (
+                get_chroma_client, get_or_create_collection, search
+            )
+            import json as _json
+
+            job_ids = _json.loads(qh.job_ids_queried) if qh.job_ids_queried else None
+
+            # Re-embed the question to retrieve context chunks
+            q_embedding = embed_query(qh.question, settings)
+            client = get_chroma_client(settings)
+            collection = get_or_create_collection(client, settings)
+            chunks = search(collection, q_embedding, top_k=settings.RAG_TOP_K, job_ids=job_ids or None)
+            contexts = [c["text"] for c in chunks]
+
+            scores = compute_ragas_scores(
+                question=qh.question,
+                answer=qh.answer,
+                contexts=contexts,
+                ground_truth=None,
+                settings=settings,
+            )
+
+            qh.ragas_scores = _json.dumps(scores)
+            qh.ragas_computed_at = datetime.utcnow()
+            db.add(qh)
+            db.commit()
+
+            log.info(
+                "ragas_computed",
+                query_id=query_history_id,
+                faithfulness=scores.get("faithfulness"),
+                answer_relevancy=scores.get("answer_relevancy"),
+            )
+
+        except Exception as exc:
+            log.error("compute_ragas_error", query_history_id=query_history_id, error=str(exc))
+            if self.request.retries < self.max_retries:
+                raise self.retry(exc=exc, countdown=60)

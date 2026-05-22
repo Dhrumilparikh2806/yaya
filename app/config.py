@@ -49,10 +49,11 @@ class Settings(BaseSettings):
         if not self.DATABASE_URL:
             errors.append("DATABASE_URL is missing")
         if errors:
-            print("STARTUP ERROR — missing required environment variables:", file=sys.stderr)
+            import sys as _sys
+            _sys.stderr.write("STARTUP ERROR — missing required environment variables:\n")
             for e in errors:
-                print(f"  • {e}", file=sys.stderr)
-            sys.exit(1)
+                _sys.stderr.write(f"  • {e}\n")
+            _sys.exit(1)
 
 
 settings = Settings()
