@@ -3,7 +3,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any
 
-import google.generativeai as genai
+from google import genai
+from google.genai import errors as genai_errors, types as genai_types
 
 from app.observability.logging import get_logger, log_llm_call
 
@@ -21,7 +22,7 @@ class BaseProcessor(ABC):
         self.job = job
         self.settings = settings
         self.log = get_logger().bind(job_id=str(job.id), file_type=job.file_type)
-        genai.configure(api_key=settings.GEMINI_API_KEY)
+        self._client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
     @abstractmethod
     def extract(self) -> str:
@@ -41,19 +42,23 @@ class BaseProcessor(ABC):
         return text, summary
 
     def _call_gemini_json(self, prompt: str, db) -> dict:
-        import google.api_core.exceptions as gexc
-
-        model = genai.GenerativeModel(self.settings.GEMINI_MODEL)
         start = time.time()
         try:
-            response = model.generate_content(
-                prompt,
-                generation_config={"response_mime_type": "application/json"},
+            response = self._client.models.generate_content(
+                model=self.settings.GEMINI_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                ),
             )
-        except gexc.ResourceExhausted as e:
-            raise RateLimitError(f"429: Gemini rate limit — {e}") from e
-        except gexc.InvalidArgument as e:
-            raise InvalidInputError(f"400: Gemini invalid argument — {e}") from e
+        except genai_errors.ClientError as e:
+            if e.code == 429:
+                raise RateLimitError(f"429: Gemini rate limit — {e}") from e
+            if e.code == 400:
+                raise InvalidInputError(f"400: Gemini invalid argument — {e}") from e
+            raise
+        except genai_errors.ServerError as e:
+            raise RateLimitError(f"503: Gemini unavailable — {e}") from e
 
         latency_ms = int((time.time() - start) * 1000)
 
@@ -62,8 +67,8 @@ class BaseProcessor(ABC):
             job_id=self.job.id,
             endpoint=f"{self.job.file_type}_processor",
             model=self.settings.GEMINI_MODEL,
-            prompt_tokens=response.usage_metadata.prompt_token_count,
-            completion_tokens=response.usage_metadata.candidates_token_count,
+            prompt_tokens=response.usage_metadata.prompt_token_count or 0,
+            completion_tokens=response.usage_metadata.candidates_token_count or 0,
             latency_ms=latency_ms,
             query_text=self.job.filename,
             llm_response_preview=response.text[:500],
@@ -77,19 +82,26 @@ class BaseProcessor(ABC):
             raise ValueError(f"Gemini response was not valid JSON: {e}") from e
 
     def _call_gemini_vision_json(self, prompt: str, image_data: bytes, mime_type: str, db) -> dict:
-        import google.api_core.exceptions as gexc
-
-        model = genai.GenerativeModel(self.settings.GEMINI_MODEL)
         start = time.time()
         try:
-            response = model.generate_content(
-                [{"mime_type": mime_type, "data": image_data}, prompt],
-                generation_config={"response_mime_type": "application/json"},
+            response = self._client.models.generate_content(
+                model=self.settings.GEMINI_MODEL,
+                contents=[
+                    genai_types.Part.from_bytes(data=image_data, mime_type=mime_type),
+                    prompt,
+                ],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                ),
             )
-        except gexc.ResourceExhausted as e:
-            raise RateLimitError(f"429: Gemini rate limit — {e}") from e
-        except gexc.InvalidArgument as e:
-            raise InvalidInputError(f"400: Gemini invalid argument — {e}") from e
+        except genai_errors.ClientError as e:
+            if e.code == 429:
+                raise RateLimitError(f"429: Gemini rate limit — {e}") from e
+            if e.code == 400:
+                raise InvalidInputError(f"400: Gemini invalid argument — {e}") from e
+            raise
+        except genai_errors.ServerError as e:
+            raise RateLimitError(f"503: Gemini unavailable — {e}") from e
 
         latency_ms = int((time.time() - start) * 1000)
 
@@ -98,8 +110,8 @@ class BaseProcessor(ABC):
             job_id=self.job.id,
             endpoint="image_processor",
             model=self.settings.GEMINI_MODEL,
-            prompt_tokens=response.usage_metadata.prompt_token_count,
-            completion_tokens=response.usage_metadata.candidates_token_count,
+            prompt_tokens=response.usage_metadata.prompt_token_count or 0,
+            completion_tokens=response.usage_metadata.candidates_token_count or 0,
             latency_ms=latency_ms,
             query_text=self.job.filename,
             llm_response_preview=response.text[:500],
@@ -116,7 +128,6 @@ class BaseProcessor(ABC):
     def _table_to_markdown(rows: list[list]) -> str:
         if not rows:
             return ""
-        # Clean None values
         cleaned = [[str(cell) if cell is not None else "" for cell in row] for row in rows]
         if not cleaned:
             return ""
