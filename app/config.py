@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     OTEL_EXPORTER: str = "stdout"
     OTEL_SERVICE_NAME: str = "geminirag"
 
+    ALLOWED_ORIGINS: str = "http://localhost:5173"
+
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+
     def model_post_init(self, __context) -> None:
         errors = []
         if not self.GEMINI_API_KEY or self.GEMINI_API_KEY in _PLACEHOLDER_VALUES:

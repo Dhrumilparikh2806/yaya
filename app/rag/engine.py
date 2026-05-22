@@ -20,6 +20,38 @@ RAG_SYSTEM_PROMPT = """You are a precise document assistant. You MUST follow the
 """
 
 
+def _resolve_chunks_and_context(question: str, job_ids: list[str] | None, settings) -> dict:
+    """Embed question, search ChromaDB, run confidence gate, build prompt. Returns dict."""
+    q_embedding = embed_query(question, settings)
+    client = get_chroma_client(settings)
+    collection = get_or_create_collection(client, settings)
+    chunks = search(collection, q_embedding, top_k=settings.RAG_TOP_K, job_ids=job_ids)
+
+    if not chunks:
+        return {"early_return": True, "payload": {
+            "answer": "No documents found to search. Please upload and process files first.",
+            "citations": [], "confidence_gate_passed": False,
+            "avg_similarity_score": 0.0, "prompt_tokens": 0,
+            "completion_tokens": 0, "latency_ms": 0, "ragas_scores": None,
+        }}
+
+    avg_score = sum(c["score"] for c in chunks) / len(chunks)
+    if avg_score < settings.CONFIDENCE_THRESHOLD:
+        return {"early_return": True, "payload": {
+            "answer": "I couldn't find sufficiently relevant information in your documents to answer this question confidently.",
+            "citations": [], "confidence_gate_passed": False,
+            "avg_similarity_score": avg_score, "prompt_tokens": 0,
+            "completion_tokens": 0, "latency_ms": 0, "ragas_scores": None,
+        }}
+
+    context_parts = [
+        f"[{i}] Source: {c['filename']} ({c['page_or_segment']})\n{c['text']}"
+        for i, c in enumerate(chunks, 1)
+    ]
+    user_prompt = f"Context:\n{chr(10).join(context_parts)}\n\nQuestion: {question}\n\nAnswer (with [n] citation markers):"
+    return {"early_return": False, "chunks": chunks, "avg_score": avg_score, "user_prompt": user_prompt}
+
+
 def query(
     question: str,
     job_ids: list[str] | None,
@@ -29,64 +61,18 @@ def query(
 ) -> dict:
     start_total = time.time()
 
-    # 1. Embed the question
-    q_embedding = embed_query(question, settings)
+    resolved = _resolve_chunks_and_context(question, job_ids, settings)
+    if resolved["early_return"]:
+        payload = resolved["payload"]
+        payload["latency_ms"] = int((time.time() - start_total) * 1000)
+        log.info("rag_query_early_exit", question=question[:100], reason="no_chunks_or_low_confidence")
+        return payload
 
-    # 2. Search ChromaDB
-    client = get_chroma_client(settings)
-    collection = get_or_create_collection(client, settings)
-    chunks = search(collection, q_embedding, top_k=settings.RAG_TOP_K, job_ids=job_ids)
+    chunks = resolved["chunks"]
+    avg_score = resolved["avg_score"]
+    user_prompt = resolved["user_prompt"]
 
-    if not chunks:
-        log.info("rag_query_no_chunks", question=question[:100], job_ids=job_ids)
-        return {
-            "answer": "No documents found to search. Please upload and process files first.",
-            "citations": [],
-            "confidence_gate_passed": False,
-            "avg_similarity_score": 0.0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "latency_ms": int((time.time() - start_total) * 1000),
-            "ragas_scores": None,
-        }
-
-    # 3. Confidence gate
-    avg_score = sum(c["score"] for c in chunks) / len(chunks)
-    if avg_score < settings.CONFIDENCE_THRESHOLD:
-        log.info(
-            "confidence_gate_blocked",
-            avg_score=round(avg_score, 4),
-            threshold=settings.CONFIDENCE_THRESHOLD,
-            question=question[:100],
-        )
-        return {
-            "answer": "I couldn't find sufficiently relevant information in your documents to answer this question confidently.",
-            "citations": [],
-            "confidence_gate_passed": False,
-            "avg_similarity_score": avg_score,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "latency_ms": int((time.time() - start_total) * 1000),
-            "ragas_scores": None,
-        }
-
-    # 4. Assemble context with citation numbers
-    context_parts = []
-    for i, chunk in enumerate(chunks, 1):
-        context_parts.append(
-            f"[{i}] Source: {chunk['filename']} ({chunk['page_or_segment']})\n{chunk['text']}"
-        )
-    context_str = "\n\n".join(context_parts)
-
-    # 5. Build prompt
-    user_prompt = f"""Context:
-{context_str}
-
-Question: {question}
-
-Answer (with [n] citation markers):"""
-
-    # 6. Call Gemini
+    # Call Gemini
     genai_client = genai.Client(api_key=settings.GEMINI_API_KEY)
     response = genai_client.models.generate_content(
         model=settings.GEMINI_MODEL,

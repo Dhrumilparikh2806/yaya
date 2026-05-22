@@ -4,10 +4,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.deps import get_db, get_current_user
-from app.models.db import Job, User, UserRole
+from app.models.db import Job, JobStatus, User, UserRole
 
 router = APIRouter()
 
@@ -57,3 +57,56 @@ def get_job(
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
+
+
+@router.get("/jobs", response_model=list[JobResponse])
+def list_jobs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role == UserRole.admin:
+        jobs = db.exec(select(Job)).all()
+    else:
+        jobs = db.exec(select(Job).where(Job.user_id == current_user.id)).all()
+    return [
+        JobResponse(
+            job_id=str(j.id), filename=j.filename, file_type=j.file_type,
+            status=j.status.value, step=j.step, retry_count=j.retry_count,
+            error_type=j.error_type.value if j.error_type else None,
+            error_message=j.error_message, chunk_count=j.chunk_count,
+            created_at=j.created_at, updated_at=j.updated_at,
+        )
+        for j in jobs
+    ]
+
+
+@router.post("/jobs/{job_id}/reprocess", status_code=202)
+def reprocess_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-queue a completed or failed job through the full processing pipeline."""
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = db.get(Job, job_uuid)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.user_id != current_user.id and current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    from app.workers.tasks import process_file, update_job_state
+
+    job.retry_count = 0
+    job.error_message = None
+    job.error_type = None
+    db.add(job)
+    db.commit()
+
+    update_job_state(db, job_uuid, JobStatus.pending, step="queued")
+    process_file.delay(job_id)
+
+    return {"job_id": job_id, "status": "PENDING", "message": "Re-queued for processing"}

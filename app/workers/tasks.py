@@ -81,6 +81,7 @@ def process_file(self, job_id: str):
 
             try:
                 span.set_attribute("file_type", job.file_type)
+                span.set_attribute("user_id", str(job.user_id))
                 update_job_state(db, job_id, JobStatus.processing, step="extracting")
 
                 file_type = job.file_type
@@ -190,6 +191,18 @@ def process_file(self, job_id: str):
                         error_type=error_type,
                         error_message=str(exc)[:500],
                     )
+                    # Push to dead letter queue for manual review
+                    try:
+                        import redis as _redis
+                        _rc = _redis.from_url(settings.REDIS_URL)
+                        import json as _json
+                        _rc.rpush("geminirag:dead_letter", _json.dumps({
+                            "job_id": job_id,
+                            "error": str(exc)[:500],
+                            "error_type": error_type_str,
+                        }))
+                    except Exception:
+                        pass
 
 
 # ── RAGAS evaluation task ─────────────────────────────────────────────────────
@@ -246,3 +259,36 @@ def compute_ragas(self, query_history_id: str):
             log.error("compute_ragas_error", query_history_id=query_history_id, error=str(exc))
             if self.request.retries < self.max_retries:
                 raise self.retry(exc=exc, countdown=60)
+
+
+# ── Daily file cleanup task ───────────────────────────────────────────────────
+
+@celery_app.task
+def cleanup_old_uploads():
+    """Delete upload files for jobs older than 7 days that are COMPLETED or FAILED_PERMANENT."""
+    import shutil
+    from datetime import timedelta
+    from pathlib import Path
+    from app.config import settings
+
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    terminal_statuses = {JobStatus.completed, JobStatus.failed_permanent}
+
+    deleted = 0
+    with Session(get_engine()) as db:
+        from sqlmodel import select as _select
+        stmt = _select(Job).where(
+            Job.updated_at < cutoff,
+            Job.status.in_([s.value for s in terminal_statuses]),
+        )
+        old_jobs = db.exec(stmt).all()
+        for job in old_jobs:
+            job_dir = Path(settings.UPLOAD_DIR) / str(job.id)
+            if job_dir.exists():
+                try:
+                    shutil.rmtree(job_dir)
+                    deleted += 1
+                except Exception as exc:
+                    log.warning("cleanup_delete_failed", job_id=str(job.id), error=str(exc))
+
+    log.info("cleanup_old_uploads_complete", jobs_cleaned=deleted)

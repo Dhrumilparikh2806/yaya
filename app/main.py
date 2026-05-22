@@ -6,10 +6,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from app.config import settings
 from app.limiter import limiter
 from app.observability.logging import configure_logging, get_logger
 from app.observability.tracing import configure_tracing
-from app.api import auth, files, jobs, query, documents, admin
+from app.api import auth, files, jobs, query, documents, admin, agent
 
 
 def create_app() -> FastAPI:
@@ -22,7 +23,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173"],
+        allow_origins=settings.allowed_origins_list,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -64,10 +65,38 @@ def create_app() -> FastAPI:
     app.include_router(query.router, prefix="/v1", tags=["query"])
     app.include_router(documents.router, prefix="/v1", tags=["documents"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
+    app.include_router(agent.router, prefix="/v1", tags=["agent"])
 
     @app.get("/health")
     def health():
-        return {"status": "ok"}
+        from app.models.db import get_engine
+        from sqlalchemy import text as _text
+
+        checks: dict[str, str] = {}
+
+        # DB check
+        try:
+            with get_engine().connect() as conn:
+                conn.execute(_text("SELECT 1"))
+            checks["database"] = "ok"
+        except Exception as exc:
+            checks["database"] = f"unreachable: {exc}"
+
+        # ChromaDB check
+        try:
+            from app.rag.vectorstore import get_chroma_client
+            get_chroma_client(settings).heartbeat()
+            checks["chromadb"] = "ok"
+        except Exception as exc:
+            checks["chromadb"] = f"unreachable: {exc}"
+
+        all_ok = all(v == "ok" for v in checks.values())
+        status_code = 200 if all_ok else 503
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            content={"status": "ok" if all_ok else "degraded", **checks},
+            status_code=status_code,
+        )
 
     return app
 

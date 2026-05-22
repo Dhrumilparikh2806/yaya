@@ -108,7 +108,13 @@ def get_engine():
     global _engine
     if _engine is None:
         from app.config import settings
-        _engine = create_engine(settings.DATABASE_URL, echo=False)
+        _engine = create_engine(
+            settings.DATABASE_URL,
+            echo=False,
+            pool_size=10,
+            max_overflow=20,
+            pool_pre_ping=True,
+        )
     return _engine
 
 

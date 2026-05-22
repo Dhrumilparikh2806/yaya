@@ -69,9 +69,19 @@ def admin_usage(
         if u:
             entry["email"] = u.email
 
+    # today summary for dashboard cards
+    today_str = datetime.utcnow().date().isoformat()
+    today_logs = [l for l in logs if l.created_at.date().isoformat() == today_str]
+    today_tokens = sum(l.total_tokens for l in today_logs)
+    avg_latency_ms = round(sum(l.latency_ms for l in logs) / len(logs), 1) if logs else 0
+
     return {
         "total_tokens": total_tokens,
+        "today_tokens": today_tokens,
+        "total_calls": len(logs),
+        "avg_latency_ms": avg_latency_ms,
         "total_cost_estimate": total_cost_estimate,
+        "daily": by_day,
         "by_day": by_day,
         "by_endpoint": by_endpoint,
         "by_user": list(by_user_map.values()),
@@ -130,7 +140,7 @@ def admin_ragas(
         for v in sorted(by_day_map.values(), key=lambda x: x["date"])
     ]
 
-    return {"avg_scores": avg_scores, "by_day": by_day, "low_scoring": low_scoring}
+    return {"averages": avg_scores, "avg_scores": avg_scores, "by_day": by_day, "low_scoring": low_scoring}
 
 
 @router.get("/users")

@@ -19,23 +19,33 @@ def get_or_create_collection(client, settings):
 def add_chunks(collection, chunks: list[dict], embeddings: list[list[float]]) -> None:
     if not chunks:
         return
+    import time as _time
     job_id = chunks[0]["job_id"] if chunks else "unknown"
-    collection.upsert(
-        ids=[f"{c['job_id']}_{c['chunk_index']}" for c in chunks],
-        embeddings=embeddings,
-        documents=[c["text"] for c in chunks],
-        metadatas=[
-            {
-                "job_id": c["job_id"],
-                "filename": c["filename"],
-                "file_type": c["file_type"],
-                "chunk_index": c["chunk_index"],
-                **c.get("metadata", {}),
-            }
-            for c in chunks
-        ],
-    )
-    log.info("chroma_add_chunks", job_id=job_id, chunk_count=len(chunks))
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            collection.upsert(
+                ids=[f"{c['job_id']}_{c['chunk_index']}" for c in chunks],
+                embeddings=embeddings,
+                documents=[c["text"] for c in chunks],
+                metadatas=[
+                    {
+                        "job_id": c["job_id"],
+                        "filename": c["filename"],
+                        "file_type": c["file_type"],
+                        "chunk_index": c["chunk_index"],
+                        **c.get("metadata", {}),
+                    }
+                    for c in chunks
+                ],
+            )
+            log.info("chroma_add_chunks", job_id=job_id, chunk_count=len(chunks))
+            return
+        except Exception as exc:
+            last_exc = exc
+            log.warning("chroma_add_chunks_retry", job_id=job_id, attempt=attempt + 1, error=str(exc))
+            _time.sleep(5)
+    raise RuntimeError(f"ChromaDB add_chunks failed after 3 attempts: {last_exc}")
 
 
 def search(
