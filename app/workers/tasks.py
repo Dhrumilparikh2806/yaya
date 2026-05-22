@@ -25,6 +25,7 @@ def update_job_state(
     chunk_count: Optional[int] = None,
 ) -> None:
     job = db.get(Job, job_id if isinstance(job_id, uuid.UUID) else uuid.UUID(str(job_id)))
+    from_status = job.status.value
     job.status = status
     job.updated_at = datetime.utcnow()
     if step is not None:
@@ -40,7 +41,8 @@ def update_job_state(
     log.info(
         "job_state_change",
         job_id=str(job_id),
-        status=status.value,
+        from_status=from_status,
+        to_status=status.value,
         step=step,
         retry_count=job.retry_count,
     )
@@ -66,124 +68,128 @@ def classify_error(exc: Exception) -> tuple[str, bool]:
 )
 def process_file(self, job_id: str):
     from app.config import settings
+    from app.observability.tracing import tracer
 
-    with Session(get_engine()) as db:
-        job = db.get(Job, uuid.UUID(job_id))
-        if not job:
-            log.error("process_file_job_not_found", job_id=job_id)
-            return
+    with tracer.start_as_current_span("process_file") as span:
+        span.set_attribute("job_id", job_id)
 
-        try:
-            update_job_state(db, job_id, JobStatus.processing, step="extracting")
+        with Session(get_engine()) as db:
+            job = db.get(Job, uuid.UUID(job_id))
+            if not job:
+                log.error("process_file_job_not_found", job_id=job_id)
+                return
 
-            file_type = job.file_type
-            log.info("process_file_start", job_id=job_id, file_type=file_type)
+            try:
+                span.set_attribute("file_type", job.file_type)
+                update_job_state(db, job_id, JobStatus.processing, step="extracting")
 
-            # ── Dispatch to correct processor ──────────────────────────────
-            if file_type == "pdf":
-                from app.processors.pdf import PDFProcessor
-                processor = PDFProcessor(job=job, settings=settings)
-            elif file_type == "docx":
-                from app.processors.docx_proc import DOCXProcessor
-                processor = DOCXProcessor(job=job, settings=settings)
-            elif file_type in ("xlsx", "csv"):
-                from app.processors.xlsx_proc import XLSXProcessor
-                processor = XLSXProcessor(job=job, settings=settings)
-            elif file_type == "image":
-                from app.processors.image import ImageProcessor
-                processor = ImageProcessor(job=job, settings=settings)
-            elif file_type in ("video", "audio"):
-                from app.processors.video import VideoAudioProcessor
-                processor = VideoAudioProcessor(job=job, settings=settings)
-            else:
-                raise ValueError(f"Unsupported file_type: {file_type}")
+                file_type = job.file_type
+                log.info("process_file_start", job_id=job_id, file_type=file_type)
 
-            # ── Extract + summarise ────────────────────────────────────────
-            extracted_text, summary = processor.run(db)
+                # ── Dispatch to correct processor ──────────────────────────
+                if file_type == "pdf":
+                    from app.processors.pdf import PDFProcessor
+                    processor = PDFProcessor(job=job, settings=settings)
+                elif file_type == "docx":
+                    from app.processors.docx_proc import DOCXProcessor
+                    processor = DOCXProcessor(job=job, settings=settings)
+                elif file_type in ("xlsx", "csv"):
+                    from app.processors.xlsx_proc import XLSXProcessor
+                    processor = XLSXProcessor(job=job, settings=settings)
+                elif file_type == "image":
+                    from app.processors.image import ImageProcessor
+                    processor = ImageProcessor(job=job, settings=settings)
+                elif file_type in ("video", "audio"):
+                    from app.processors.video import VideoAudioProcessor
+                    processor = VideoAudioProcessor(job=job, settings=settings)
+                else:
+                    raise ValueError(f"Unsupported file_type: {file_type}")
 
-            # ── Chunking ──────────────────────────────────────────────────
-            update_job_state(db, job_id, JobStatus.processing, step="chunking")
+                # ── Extract + summarise ────────────────────────────────────
+                extracted_text, summary = processor.run(db)
 
-            from app.rag.chunker import chunk_text, chunk_video_segments
+                # ── Chunking ──────────────────────────────────────────────
+                update_job_state(db, job_id, JobStatus.processing, step="chunking")
 
-            if file_type in ("video", "audio"):
-                result_dict = json.loads(job.result) if job.result else {}
-                segments = result_dict.get("segments", [])
-                chunks = chunk_video_segments(segments, job_id, job.filename)
-            else:
-                chunks = chunk_text(
-                    extracted_text,
+                from app.rag.chunker import chunk_text, chunk_video_segments
+
+                if file_type in ("video", "audio"):
+                    result_dict = json.loads(job.result) if job.result else {}
+                    segments = result_dict.get("segments", [])
+                    chunks = chunk_video_segments(segments, job_id, job.filename)
+                else:
+                    chunks = chunk_text(
+                        extracted_text,
+                        job_id=job_id,
+                        filename=job.filename,
+                        file_type=file_type,
+                        chunk_size=settings.CHUNK_SIZE,
+                        overlap=settings.CHUNK_OVERLAP,
+                    )
+
+                if not chunks:
+                    log.warning("no_chunks_produced", job_id=job_id, file_type=file_type)
+
+                # ── Embedding ─────────────────────────────────────────────
+                update_job_state(db, job_id, JobStatus.processing, step="embedding")
+
+                embeddings = []
+                if chunks:
+                    from app.rag.embedder import embed_chunks
+                    embeddings = embed_chunks(chunks, job.user_id, job.id, settings, db)
+
+                # ── Indexing ──────────────────────────────────────────────
+                update_job_state(db, job_id, JobStatus.processing, step="indexing")
+
+                if chunks and embeddings:
+                    from app.rag.vectorstore import get_chroma_client, get_or_create_collection, delete_job_chunks, add_chunks
+                    client = get_chroma_client(settings)
+                    collection = get_or_create_collection(client, settings)
+                    delete_job_chunks(collection, job_id)
+                    add_chunks(collection, chunks, embeddings)
+
+                # ── Complete ──────────────────────────────────────────────
+                update_job_state(
+                    db, job_id, JobStatus.completed,
+                    step="completed",
+                    chunk_count=len(chunks),
+                )
+                log.info("process_file_completed", job_id=job_id, chunk_count=len(chunks))
+
+            except Exception as exc:
+                error_type_str, retryable = classify_error(exc)
+                error_type = ErrorType(error_type_str)
+
+                db.refresh(job)
+                job.retry_count += 1
+                db.add(job)
+                db.commit()
+
+                log.error(
+                    "process_file_error",
                     job_id=job_id,
-                    filename=job.filename,
-                    file_type=file_type,
-                    chunk_size=settings.CHUNK_SIZE,
-                    overlap=settings.CHUNK_OVERLAP,
+                    error_type=error_type_str,
+                    retryable=retryable,
+                    retry_count=job.retry_count,
+                    error=str(exc),
                 )
 
-            if not chunks:
-                log.warning("no_chunks_produced", job_id=job_id, file_type=file_type)
-
-            # ── Embedding ─────────────────────────────────────────────────
-            update_job_state(db, job_id, JobStatus.processing, step="embedding")
-
-            embeddings = []
-            if chunks:
-                from app.rag.embedder import embed_chunks
-                embeddings = embed_chunks(chunks, job.user_id, job.id, settings, db)
-
-            # ── Indexing ──────────────────────────────────────────────────
-            update_job_state(db, job_id, JobStatus.processing, step="indexing")
-
-            if chunks and embeddings:
-                from app.rag.vectorstore import get_chroma_client, get_or_create_collection, delete_job_chunks, add_chunks
-                client = get_chroma_client(settings)
-                collection = get_or_create_collection(client, settings)
-                delete_job_chunks(collection, job_id)
-                add_chunks(collection, chunks, embeddings)
-
-            # ── Complete ──────────────────────────────────────────────────
-            update_job_state(
-                db, job_id, JobStatus.completed,
-                step="completed",
-                chunk_count=len(chunks),
-            )
-            log.info("process_file_completed", job_id=job_id, chunk_count=len(chunks))
-
-        except Exception as exc:
-            error_type_str, retryable = classify_error(exc)
-            error_type = ErrorType(error_type_str)
-
-            # Refresh retry count
-            db.refresh(job)
-            job.retry_count += 1
-            db.add(job)
-            db.commit()
-
-            log.error(
-                "process_file_error",
-                job_id=job_id,
-                error_type=error_type_str,
-                retryable=retryable,
-                retry_count=job.retry_count,
-                error=str(exc),
-            )
-
-            if retryable and self.request.retries < self.max_retries:
-                update_job_state(
-                    db, job_id, JobStatus.failed,
-                    step="failed",
-                    error_type=error_type,
-                    error_message=str(exc)[:500],
-                )
-                countdown = settings.CELERY_RETRY_BACKOFF * (2 ** self.request.retries)
-                raise self.retry(exc=exc, countdown=countdown)
-            else:
-                update_job_state(
-                    db, job_id, JobStatus.failed_permanent,
-                    step="failed",
-                    error_type=error_type,
-                    error_message=str(exc)[:500],
-                )
+                if retryable and self.request.retries < self.max_retries:
+                    update_job_state(
+                        db, job_id, JobStatus.failed,
+                        step="failed",
+                        error_type=error_type,
+                        error_message=str(exc)[:500],
+                    )
+                    countdown = settings.CELERY_RETRY_BACKOFF * (2 ** self.request.retries)
+                    raise self.retry(exc=exc, countdown=countdown)
+                else:
+                    update_job_state(
+                        db, job_id, JobStatus.failed_permanent,
+                        step="failed",
+                        error_type=error_type,
+                        error_message=str(exc)[:500],
+                    )
 
 
 # ── RAGAS evaluation task ─────────────────────────────────────────────────────

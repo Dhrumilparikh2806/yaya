@@ -36,9 +36,21 @@ def create_app() -> FastAPI:
         start = time.time()
         response = await call_next(request)
         latency_ms = int((time.time() - start) * 1000)
+
+        user_id = None
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            try:
+                from app.security import decode_token
+                payload = decode_token(auth_header.split(" ", 1)[1])
+                user_id = payload.get("sub")
+            except Exception:
+                pass
+
         get_logger().info(
             "http_request",
             request_id=request_id,
+            user_id=user_id,
             endpoint=str(request.url.path),
             method=request.method,
             status_code=response.status_code,
