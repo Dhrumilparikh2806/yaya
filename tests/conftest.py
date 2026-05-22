@@ -36,6 +36,12 @@ def client(engine):
     import app.models.db as _db
     _db._engine = engine  # point app to the same engine instance
     from app.main import app
+    # Reset rate limiter storage so each test starts with a clean slate
+    from app.limiter import limiter
+    try:
+        limiter._storage.reset()
+    except Exception:
+        pass
     with TestClient(app) as c:
         yield c
     _db._engine = None  # reset after test
