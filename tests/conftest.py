@@ -16,11 +16,11 @@ os.environ.setdefault("CHROMA_PORT", "8001")
 
 @pytest.fixture(scope="session")
 def engine():
-    from app.models.db import get_engine
     eng = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(eng)
     yield eng
     SQLModel.metadata.drop_all(eng)
+    eng.dispose()
 
 
 @pytest.fixture
@@ -30,7 +30,12 @@ def db(engine):
 
 
 @pytest.fixture
-def client():
+def client(engine):
+    # engine fixture runs first, ensuring tables exist in test_geminirag.db
+    # The app's get_engine() will connect to the same SQLite file
+    import app.models.db as _db
+    _db._engine = engine  # point app to the same engine instance
     from app.main import app
     with TestClient(app) as c:
         yield c
+    _db._engine = None  # reset after test
