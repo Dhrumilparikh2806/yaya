@@ -158,33 +158,34 @@ def query_rag(question: str, job_ids: list[str] | None = None) -> dict:
     return result
 
 
-def list_documents() -> list[dict]:
+def list_documents(limit: int = 20) -> dict:
     """
-    List all successfully processed documents available for querying.
-    Returns:
-        List of documents with job_id, filename, file_type, chunk_count, created_at.
+    List successfully processed documents available for querying.
+    Returns a summary with total count plus up to `limit` recent documents.
     """
     start = time.monotonic()
     try:
-        user_id_str = _current_user_id.get()
         with Session(get_engine()) as db:
             stmt = select(Job).where(Job.status == JobStatus.completed)
-            if user_id_str:
-                stmt = stmt.where(Job.user_id == uuid.UUID(user_id_str))
             jobs = db.exec(stmt).all()
-            result = [
-                {
-                    "job_id": str(j.id),
-                    "filename": j.filename,
-                    "file_type": j.file_type,
-                    "chunk_count": j.chunk_count,
-                    "created_at": j.created_at.isoformat(),
-                }
-                for j in jobs
-            ]
+            total = len(jobs)
+            shown = jobs[:limit]
+            result = {
+                "total_documents": total,
+                "showing": len(shown),
+                "documents": [
+                    {
+                        "job_id": str(j.id),
+                        "filename": j.filename,
+                        "file_type": j.file_type,
+                        "chunk_count": j.chunk_count,
+                    }
+                    for j in shown
+                ],
+            }
     except Exception as exc:
         log.error("tool_call_error", tool_name="list_documents", error=str(exc))
-        result = []
+        result = {"total_documents": 0, "showing": 0, "documents": []}
 
     latency_ms = int((time.monotonic() - start) * 1000)
     log.info("tool_call", tool_name="list_documents", latency_ms=latency_ms, result_preview=str(result)[:200])

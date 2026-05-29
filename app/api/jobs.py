@@ -41,8 +41,7 @@ def get_job(
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-    if job.user_id != current_user.id and current_user.role != UserRole.admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    # All users can view any job
 
     return JobResponse(
         job_id=str(job.id),
@@ -64,10 +63,7 @@ def list_jobs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role == UserRole.admin:
-        jobs = db.exec(select(Job)).all()
-    else:
-        jobs = db.exec(select(Job).where(Job.user_id == current_user.id)).all()
+    jobs = db.exec(select(Job)).all()
     return [
         JobResponse(
             job_id=str(j.id), filename=j.filename, file_type=j.file_type,
@@ -95,8 +91,7 @@ def reprocess_job(
     job = db.get(Job, job_uuid)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.user_id != current_user.id and current_user.role != UserRole.admin:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # All users can reprocess any job
 
     from app.workers.tasks import process_file, update_job_state
 

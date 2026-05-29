@@ -65,22 +65,55 @@ def search(
 
     results = collection.query(**kwargs)
     chunks = []
-    for doc, meta, dist in zip(
+    for chunk_id, doc, meta, dist in zip(
+        results["ids"][0],
         results["documents"][0],
         results["metadatas"][0],
         results["distances"][0],
     ):
+        # Return parent text if available (hierarchical chunking) — richer context for LLM
+        text = meta.get("parent_text") or doc
         chunks.append({
-            "text": doc,
+            "id": chunk_id,
+            "text": text,
             "score": 1 - dist,
             "filename": meta["filename"],
-            "page_or_segment": meta.get(
-                "page_or_segment", f"chunk {meta['chunk_index']}"
-            ),
+            "page_or_segment": meta.get("page_or_segment", f"chunk {meta['chunk_index']}"),
             "job_id": meta["job_id"],
         })
     chunks.sort(key=lambda x: x["score"], reverse=True)
     return chunks
+
+
+def rrf_merge(
+    vector_results: list[dict],
+    bm25_results: list[dict],
+    top_k: int,
+    k: int = 60,
+) -> list[dict]:
+    """Reciprocal Rank Fusion — merges vector and BM25 result lists."""
+    scores: dict[str, dict] = {}
+
+    for rank, r in enumerate(vector_results):
+        rid = r["id"]
+        if rid not in scores:
+            scores[rid] = {"rrf": 0.0, "data": r}
+        scores[rid]["rrf"] += 1.0 / (k + rank + 1)
+
+    for rank, r in enumerate(bm25_results):
+        rid = r["id"]
+        if rid not in scores:
+            scores[rid] = {"rrf": 0.0, "data": r}
+        scores[rid]["rrf"] += 1.0 / (k + rank + 1)
+
+    sorted_items = sorted(scores.values(), key=lambda x: x["rrf"], reverse=True)
+    results = [s["data"] for s in sorted_items[:top_k]]
+
+    # Attach merged rrf score so confidence gate works
+    for item, s in zip(results, sorted_items[:top_k]):
+        item["score"] = s["rrf"]
+
+    return results
 
 
 def delete_job_chunks(collection, job_id: str) -> None:

@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PLACEHOLDER_VALUES = {
     "your_gemini_api_key_here",
+    "your_groq_api_key_here",
     "change_me_to_a_long_random_string",
 }
 
@@ -11,10 +12,13 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # P0 — required
-    GEMINI_API_KEY: str
+    GROQ_API_KEY: str
     DATABASE_URL: str
     REDIS_URL: str
     SECRET_KEY: str
+
+    # Gemini kept only for ADK agent (not used in pipeline)
+    GEMINI_API_KEY: str = ""
 
     # P1 — defaults provided
     CHROMA_HOST: str = "localhost"
@@ -26,13 +30,20 @@ class Settings(BaseSettings):
 
     UPLOAD_DIR: str = "/tmp/geminirag_uploads"
 
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_PROCESSING_MODEL: str = "llama-3.1-8b-instant"
+    GROQ_VISION_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+
+    # Kept for ADK agent and backward compat
     GEMINI_MODEL: str = "gemini-2.0-flash"
     GEMINI_EMBEDDING_MODEL: str = "models/text-embedding-004"
 
-    CHUNK_SIZE: int = 800
-    CHUNK_OVERLAP: int = 100
-    RAG_TOP_K: int = 5
-    CONFIDENCE_THRESHOLD: float = 0.65
+    CHUNK_SIZE: int = 600
+    CHILD_CHUNK_SIZE: int = 150
+    CHUNK_OVERLAP: int = 50
+    RAG_TOP_K: int = 8
+    CONFIDENCE_THRESHOLD: float = 0.4
 
     CELERY_MAX_RETRIES: int = 3
     CELERY_RETRY_BACKOFF: int = 60
@@ -48,8 +59,8 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context) -> None:
         errors = []
-        if not self.GEMINI_API_KEY or self.GEMINI_API_KEY in _PLACEHOLDER_VALUES:
-            errors.append("GEMINI_API_KEY is missing or still a placeholder")
+        if not self.GROQ_API_KEY or self.GROQ_API_KEY in _PLACEHOLDER_VALUES:
+            errors.append("GROQ_API_KEY is missing or still a placeholder")
         if not self.SECRET_KEY or self.SECRET_KEY in _PLACEHOLDER_VALUES:
             errors.append("SECRET_KEY is missing or still a placeholder")
         if not self.DATABASE_URL:

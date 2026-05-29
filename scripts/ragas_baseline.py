@@ -1,13 +1,10 @@
 """
 Offline RAGAS baseline evaluation.
 Usage: py scripts/ragas_baseline.py [--test-set /path/to/test_set.json]
-
-Loads /tmp/ragas_test_set.json (or --test-set path), runs RAG engine for each
-Q&A pair, computes RAGAS scores with ground_truth, prints a summary table,
-and saves results to /tmp/ragas_baseline.json.
 """
 import json
 import sys
+import time
 import argparse
 from pathlib import Path
 
@@ -19,9 +16,46 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlmodel import Session, create_engine, select
 import os
 
-
 DATABASE_URL = os.environ["DATABASE_URL"]
 engine = create_engine(DATABASE_URL, echo=False)
+
+
+def _rag_query_with_retry(question, job_ids, user_id, db, settings, max_wait=600):
+    """Call rag_engine.query() with retry on 429, returns (answer, full_contexts)."""
+    from app.rag.engine import _resolve_chunks_and_context
+    import groq as groq_sdk
+
+    # Retrieve full chunks for RAGAS (not truncated 200-char excerpts)
+    resolved = _resolve_chunks_and_context(question, job_ids, settings)
+    if resolved["early_return"]:
+        return resolved["payload"]["answer"], []
+
+    chunks = resolved["chunks"]
+    user_prompt = resolved["user_prompt"]
+    full_contexts = [c["text"] for c in chunks]
+
+    groq_client = groq_sdk.Groq(api_key=settings.GROQ_API_KEY)
+    for attempt in range(5):
+        try:
+            resp = groq_client.chat.completions.create(
+                model=settings.GROQ_PROCESSING_MODEL,
+                messages=[
+                    {"role": "system", "content": (
+                        "You are a document Q&A assistant. Answer using ONLY the context excerpts provided. "
+                        "Every factual claim must be followed by a [n] citation marker. "
+                        "If the information is not in the context, say so."
+                    )},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=512,
+            )
+            answer = resp.choices[0].message.content
+            return answer, full_contexts
+        except groq_sdk.RateLimitError as e:
+            wait = 60 * (attempt + 1)
+            print(f"  [RAG 429] waiting {wait}s... ({e!s:.80})")
+            time.sleep(wait)
+    return "Rate limit — could not generate answer.", full_contexts
 
 
 def main():
@@ -32,12 +66,6 @@ def main():
     test_set_path = Path(args.test_set)
     if not test_set_path.exists():
         print(f"[ERROR] Test set not found: {test_set_path}")
-        print("Create a JSON file with this structure:")
-        print(json.dumps([{
-            "question": "What is the main contribution of the paper?",
-            "ground_truth": "The paper proposes...",
-            "job_id": "paste-job-uuid-here"
-        }], indent=2))
         sys.exit(1)
 
     with open(test_set_path) as f:
@@ -46,7 +74,6 @@ def main():
     print(f"Loaded {len(test_set)} Q&A pairs from {test_set_path}")
 
     from app.config import settings
-    from app.rag import engine as rag_engine
     from app.evaluation.ragas_eval import compute_ragas_scores
 
     results = []
@@ -62,7 +89,6 @@ def main():
             job_id = item.get("job_id")
             job_ids = [job_id] if job_id else None
 
-            # Find a user to query as (use first user that owns the job)
             from app.models.db import Job, User
             user_id = None
             if job_id:
@@ -74,22 +100,20 @@ def main():
                 user_id = user.id if user else None
 
             try:
-                result = rag_engine.query(
-                    question=question,
-                    job_ids=job_ids,
-                    user_id=user_id,
-                    db=db,
-                    settings=settings,
+                answer, full_contexts = _rag_query_with_retry(
+                    question, job_ids, user_id, db, settings
                 )
-                answer = result["answer"]
-                contexts = [c["excerpt"] for c in result.get("citations", [])]
-                if not contexts:
-                    contexts = ["(no context retrieved)"]
+                if not full_contexts:
+                    full_contexts = ["(no context retrieved)"]
+
+                # Truncate each context to 600 chars for RAGAS eval to stay within
+                # 8b model's 6K TPM limit (6 chunks × 600 chars ≈ 3600 chars + overhead)
+                ragas_contexts = [c[:600] for c in full_contexts]
 
                 scores = compute_ragas_scores(
                     question=question,
                     answer=answer,
-                    contexts=contexts,
+                    contexts=ragas_contexts,
                     ground_truth=ground_truth,
                     settings=settings,
                 )
@@ -114,32 +138,33 @@ def main():
                 print(f"[SKIP] {question[:50]}: {e}")
                 results.append({"question": question, "error": str(e)})
 
-    # Compute averages
-    if results:
-        metric_keys = ["faithfulness", "answer_relevancy", "context_precision", "context_recall", "answer_correctness"]
-        sums = {k: 0.0 for k in metric_keys}
-        counts = {k: 0 for k in metric_keys}
-        for r in results:
-            for k in metric_keys:
-                v = r.get("scores", {}).get(k)
-                if isinstance(v, float):
-                    sums[k] += v
-                    counts[k] += 1
-        avgs = {k: round(sums[k] / counts[k], 4) if counts[k] else None for k in metric_keys}
+            # Small gap between questions to ease rate limits
+            time.sleep(5)
 
-        print("\n" + "=" * 60)
-        print("BASELINE AVERAGES")
-        print("=" * 60)
-        for k, v in avgs.items():
-            target = {"faithfulness": 0.8, "context_precision": 0.6}.get(k, 0.7)
-            status = "PASS" if v and v >= target else "BELOW TARGET"
-            print(f"  {k:<25} {v if v else 'N/A':>6}  (target ≥ {target}) {status}")
+    metric_keys = ["faithfulness", "answer_relevancy", "context_precision", "context_recall", "answer_correctness"]
+    sums = {k: 0.0 for k in metric_keys}
+    counts = {k: 0 for k in metric_keys}
+    for r in results:
+        for k in metric_keys:
+            v = r.get("scores", {}).get(k)
+            if isinstance(v, float) and not __import__("math").isnan(v):
+                sums[k] += v
+                counts[k] += 1
+    avgs = {k: round(sums[k] / counts[k], 4) if counts[k] else None for k in metric_keys}
 
-        out_path = Path("C:/tmp/ragas_baseline.json")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w") as f:
-            json.dump({"results": results, "averages": avgs}, f, indent=2)
-        print(f"\nSaved to {out_path}")
+    print("\n" + "=" * 60)
+    print("BASELINE AVERAGES")
+    print("=" * 60)
+    for k, v in avgs.items():
+        target = {"faithfulness": 0.8, "context_precision": 0.6}.get(k, 0.7)
+        status = "PASS" if v and v >= target else "BELOW TARGET"
+        print(f"  {k:<25} {str(v) if v is not None else 'N/A':>8}  (target >= {target}) {status}")
+
+    out_path = Path("C:/tmp/ragas_baseline.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump({"results": results, "averages": avgs}, f, indent=2)
+    print(f"\nSaved to {out_path}")
 
 
 if __name__ == "__main__":

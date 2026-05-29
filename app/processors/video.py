@@ -1,6 +1,8 @@
+import json
 import os
 import time
 
+from google import genai
 from google.genai import errors as genai_errors, types as genai_types
 
 from app.observability.logging import log_llm_call
@@ -10,7 +12,7 @@ DIARIZATION_PROMPT = """You are an expert transcription service. Transcribe this
 
 Rules:
 - Identify each distinct speaker. Label them "Speaker 1", "Speaker 2", etc.
-- Use the SAME label for the SAME speaker throughout — never switch labels for one person.
+- Use the SAME label for the SAME speaker throughout.
 - Include timestamps in MM:SS format for each segment.
 - Transcribe every word spoken. Do not summarise or paraphrase.
 
@@ -21,17 +23,12 @@ Return ONLY valid JSON with this exact structure. No preamble, no markdown.
   "speaker_count": 0,
   "speakers": ["Speaker 1", "Speaker 2"],
   "segments": [
-    {
-      "speaker": "Speaker 1",
-      "timestamp": "00:00",
-      "text": "exact words spoken"
-    }
+    {"speaker": "Speaker 1", "timestamp": "00:00", "text": "exact words spoken"}
   ],
-  "full_transcript": "continuous transcript with speaker labels inline: Speaker 1: ... Speaker 2: ...",
-  "summary": "2-3 sentence summary of the meeting/recording",
-  "action_items": ["action item 1", "action item 2"],
-  "key_decisions": ["decision 1", "decision 2"],
-  "topics_discussed": ["topic 1", "topic 2"]
+  "summary": "2-3 sentence summary",
+  "action_items": ["action item 1"],
+  "key_decisions": ["decision 1"],
+  "topics_discussed": ["topic 1"]
 }
 """
 
@@ -41,13 +38,16 @@ class VideoAudioProcessor(BaseProcessor):
         file_size = os.path.getsize(self.job.file_path)
         self.log.info("uploading_to_gemini_files", file_size=file_size)
 
+        from app.config import settings as _settings
+        gemini_client = genai.Client(api_key=_settings.GEMINI_API_KEY)
+
         start = time.time()
-        uploaded_file = self._client.files.upload(
+        uploaded_file = gemini_client.files.upload(
             file=self.job.file_path,
             config=genai_types.UploadFileConfig(display_name=self.job.filename),
         )
 
-        timeout = 300  # 5 minutes
+        timeout = 300
         last_log = start
         while str(uploaded_file.state) in ("FileState.PROCESSING", "PROCESSING"):
             elapsed = time.time() - start
@@ -57,27 +57,24 @@ class VideoAudioProcessor(BaseProcessor):
                 self.log.info("gemini_upload_in_progress", elapsed_s=int(elapsed))
                 last_log = time.time()
             time.sleep(2)
-            uploaded_file = self._client.files.get(name=uploaded_file.name)
+            uploaded_file = gemini_client.files.get(name=uploaded_file.name)
 
         state_str = str(uploaded_file.state)
         if "FAILED" in state_str:
             raise ValueError(f"Gemini file upload failed: {state_str}")
 
-        self.log.info(
-            "gemini_upload_complete",
-            upload_s=int(time.time() - start),
-            file_size=file_size,
-        )
+        self.log.info("gemini_upload_complete", upload_s=int(time.time() - start))
         self._uploaded_file = uploaded_file
+        self._gemini_client = gemini_client
         return ""
 
     def summarise(self, text: str, db) -> dict:
-        import json
+        from app.config import settings as _settings
 
         start = time.time()
         try:
-            response = self._client.models.generate_content(
-                model=self.settings.GEMINI_MODEL,
+            response = self._gemini_client.models.generate_content(
+                model=_settings.GEMINI_MODEL,
                 contents=[self._uploaded_file, DIARIZATION_PROMPT],
                 config=genai_types.GenerateContentConfig(
                     response_mime_type="application/json"
@@ -98,7 +95,7 @@ class VideoAudioProcessor(BaseProcessor):
             user_id=self.job.user_id,
             job_id=self.job.id,
             endpoint="video_audio_processor",
-            model=self.settings.GEMINI_MODEL,
+            model=_settings.GEMINI_MODEL,
             prompt_tokens=response.usage_metadata.prompt_token_count or 0,
             completion_tokens=response.usage_metadata.candidates_token_count or 0,
             latency_ms=latency_ms,
@@ -114,8 +111,14 @@ class VideoAudioProcessor(BaseProcessor):
             raise ValueError(f"Gemini diarization response was not valid JSON: {e}") from e
 
         if "segments" not in result or not isinstance(result["segments"], list):
-            raise ValueError(
-                f"Diarization response missing 'segments' list: {list(result.keys())}"
-            )
+            raise ValueError(f"Diarization response missing 'segments' list")
+
+        # Convert segments to markdown for unified chunking
+        segments_md = "\n\n".join(
+            f"## [{seg['speaker']} at {seg['timestamp']}]\n\n{seg['text']}"
+            for seg in result["segments"]
+        )
+        full_markdown = f"# {self.job.filename}\n\n{segments_md}"
+        result["_chunk_text"] = full_markdown
 
         return result

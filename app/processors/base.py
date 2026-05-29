@@ -1,10 +1,10 @@
+import base64
 import json
 import time
 from abc import ABC, abstractmethod
-from typing import Any
+from pathlib import Path
 
-from google import genai
-from google.genai import errors as genai_errors, types as genai_types
+import groq as groq_sdk
 
 from app.observability.logging import get_logger, log_llm_call
 
@@ -22,107 +22,191 @@ class BaseProcessor(ABC):
         self.job = job
         self.settings = settings
         self.log = get_logger().bind(job_id=str(job.id), file_type=job.file_type)
-        self._client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        self._client = groq_sdk.Groq(api_key=settings.GROQ_API_KEY)
 
     @abstractmethod
     def extract(self) -> str:
-        """Extract raw text from the file. Returns plain text string."""
+        """Extract raw markdown from the file. Returns markdown string."""
 
     @abstractmethod
     def summarise(self, text: str, db) -> dict:
-        """Call Gemini and return structured summary dict."""
+        """Call LLM and return structured summary dict.
+        May include '_chunk_text' key to override what gets chunked."""
 
     def run(self, db) -> tuple[str, dict]:
-        """Called by Celery task. Returns (extracted_text, summary_dict)."""
+        """Called by Celery task. Returns (markdown_for_chunking, summary_dict)."""
         text = self.extract()
         summary = self.summarise(text, db)
+        # Allow processors to override chunking text via '_chunk_text' key
+        chunk_override = summary.pop("_chunk_text", None)
         self.job.result = json.dumps(summary)
         db.add(self.job)
         db.commit()
-        return text, summary
+
+        chunk_text = chunk_override if chunk_override is not None else text
+
+        # Save markdown to disk alongside the source file
+        if chunk_text.strip():
+            md_path = Path(self.job.file_path).parent / "extracted.md"
+            try:
+                md_path.write_text(chunk_text, encoding="utf-8")
+                self.log.info("markdown_saved", path=str(md_path), chars=len(chunk_text))
+            except Exception as exc:
+                self.log.warning("markdown_save_failed", error=str(exc))
+
+        return chunk_text, summary
 
     def _call_gemini_json(self, prompt: str, db) -> dict:
+        """LLM text call — returns parsed JSON dict."""
         start = time.time()
-        try:
-            response = self._client.models.generate_content(
-                model=self.settings.GEMINI_MODEL,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json"
-                ),
-            )
-        except genai_errors.ClientError as e:
-            if e.code == 429:
-                raise RateLimitError(f"429: Gemini rate limit — {e}") from e
-            if e.code == 400:
-                raise InvalidInputError(f"400: Gemini invalid argument — {e}") from e
-            raise
-        except genai_errors.ServerError as e:
-            raise RateLimitError(f"503: Gemini unavailable — {e}") from e
+        for attempt in range(4):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.settings.GROQ_PROCESSING_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
+                    max_tokens=512,
+                )
+                break
+            except groq_sdk.RateLimitError as e:
+                if attempt < 3:
+                    wait = 30 * (attempt + 1)
+                    self.log.warning("groq_rate_limit_retry", attempt=attempt, wait_s=wait)
+                    time.sleep(wait)
+                    continue
+                raise RateLimitError(f"429: Groq rate limit — {e}") from e
+            except groq_sdk.BadRequestError as e:
+                raise InvalidInputError(f"400: Groq invalid argument — {e}") from e
+            except groq_sdk.APIStatusError as e:
+                if e.status_code in (413, 503):
+                    if attempt < 3:
+                        time.sleep(30 * (attempt + 1))
+                        continue
+                    raise RateLimitError(f"{e.status_code}: Groq unavailable — {e}") from e
+                raise
 
         latency_ms = int((time.time() - start) * 1000)
+        text = response.choices[0].message.content
 
         log_llm_call(
             user_id=self.job.user_id,
             job_id=self.job.id,
             endpoint=f"{self.job.file_type}_processor",
-            model=self.settings.GEMINI_MODEL,
-            prompt_tokens=response.usage_metadata.prompt_token_count or 0,
-            completion_tokens=response.usage_metadata.candidates_token_count or 0,
+            model=self.settings.GROQ_PROCESSING_MODEL,
+            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
+            completion_tokens=response.usage.completion_tokens if response.usage else 0,
             latency_ms=latency_ms,
             query_text=self.job.filename,
-            llm_response_preview=response.text[:500],
+            llm_response_preview=text[:500],
             db=db,
         )
 
         try:
-            return json.loads(response.text)
+            return json.loads(text)
         except json.JSONDecodeError as e:
-            self.log.error("gemini_json_parse_failed", raw=response.text[:1000])
-            raise ValueError(f"Gemini response was not valid JSON: {e}") from e
+            self.log.error("groq_json_parse_failed", raw=text[:1000])
+            raise ValueError(f"Groq response was not valid JSON: {e}") from e
 
-    def _call_gemini_vision_json(self, prompt: str, image_data: bytes, mime_type: str, db) -> dict:
+    def _call_vision_markdown(self, prompt: str, image_data: bytes, mime_type: str, db) -> str:
+        """Vision LLM call — returns plain markdown text."""
         start = time.time()
-        try:
-            response = self._client.models.generate_content(
-                model=self.settings.GEMINI_MODEL,
-                contents=[
-                    genai_types.Part.from_bytes(data=image_data, mime_type=mime_type),
-                    prompt,
-                ],
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json"
-                ),
-            )
-        except genai_errors.ClientError as e:
-            if e.code == 429:
-                raise RateLimitError(f"429: Gemini rate limit — {e}") from e
-            if e.code == 400:
-                raise InvalidInputError(f"400: Gemini invalid argument — {e}") from e
-            raise
-        except genai_errors.ServerError as e:
-            raise RateLimitError(f"503: Gemini unavailable — {e}") from e
+        b64_image = base64.b64encode(image_data).decode("utf-8")
+        for attempt in range(4):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.settings.GROQ_VISION_MODEL,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_image}"}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }],
+                    max_tokens=2048,
+                )
+                break
+            except groq_sdk.RateLimitError as e:
+                if attempt < 3:
+                    wait = 30 * (attempt + 1)
+                    self.log.warning("groq_vision_rate_limit_retry", attempt=attempt, wait_s=wait)
+                    time.sleep(wait)
+                    continue
+                raise RateLimitError(f"429: Groq rate limit — {e}") from e
+            except groq_sdk.BadRequestError as e:
+                raise InvalidInputError(f"400: Groq invalid argument — {e}") from e
+            except groq_sdk.APIStatusError as e:
+                if e.status_code == 503:
+                    if attempt < 3:
+                        time.sleep(30 * (attempt + 1))
+                        continue
+                    raise RateLimitError(f"503: Groq unavailable — {e}") from e
+                raise
 
         latency_ms = int((time.time() - start) * 1000)
+        text = response.choices[0].message.content or ""
 
         log_llm_call(
             user_id=self.job.user_id,
             job_id=self.job.id,
             endpoint="image_processor",
-            model=self.settings.GEMINI_MODEL,
-            prompt_tokens=response.usage_metadata.prompt_token_count or 0,
-            completion_tokens=response.usage_metadata.candidates_token_count or 0,
+            model=self.settings.GROQ_VISION_MODEL,
+            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
+            completion_tokens=response.usage.completion_tokens if response.usage else 0,
             latency_ms=latency_ms,
             query_text=self.job.filename,
-            llm_response_preview=response.text[:500],
+            llm_response_preview=text[:500],
+            db=db,
+        )
+
+        return text
+
+    def _call_gemini_vision_json(self, prompt: str, image_data: bytes, mime_type: str, db) -> dict:
+        """Vision LLM call — returns parsed JSON dict."""
+        start = time.time()
+        b64_image = base64.b64encode(image_data).decode("utf-8")
+        try:
+            response = self._client.chat.completions.create(
+                model=self.settings.GROQ_VISION_MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_image}"}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+                response_format={"type": "json_object"},
+                max_tokens=512,
+            )
+        except groq_sdk.RateLimitError as e:
+            raise RateLimitError(f"429: Groq rate limit — {e}") from e
+        except groq_sdk.BadRequestError as e:
+            raise InvalidInputError(f"400: Groq invalid argument — {e}") from e
+        except groq_sdk.APIStatusError as e:
+            if e.status_code == 503:
+                raise RateLimitError(f"503: Groq unavailable — {e}") from e
+            raise
+
+        latency_ms = int((time.time() - start) * 1000)
+        text = response.choices[0].message.content
+
+        log_llm_call(
+            user_id=self.job.user_id,
+            job_id=self.job.id,
+            endpoint="image_processor",
+            model=self.settings.GROQ_VISION_MODEL,
+            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
+            completion_tokens=response.usage.completion_tokens if response.usage else 0,
+            latency_ms=latency_ms,
+            query_text=self.job.filename,
+            llm_response_preview=text[:500],
             db=db,
         )
 
         try:
-            return json.loads(response.text)
+            return json.loads(text)
         except json.JSONDecodeError as e:
-            self.log.error("gemini_vision_json_parse_failed", raw=response.text[:1000])
-            raise ValueError(f"Gemini vision response was not valid JSON: {e}") from e
+            self.log.error("groq_vision_json_parse_failed", raw=text[:1000])
+            raise ValueError(f"Groq vision response was not valid JSON: {e}") from e
 
     @staticmethod
     def _table_to_markdown(rows: list[list]) -> str:

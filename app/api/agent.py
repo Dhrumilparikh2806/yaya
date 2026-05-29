@@ -26,3 +26,16 @@ async def agent_chat(
         user_id=str(current_user.id),
         session_id=req.session_id,
     )
+
+
+@router.delete("/agent/session/{session_id}")
+async def clear_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    from app.agent.agent import SESSION_KEY_PREFIX, _redis
+    try:
+        _redis().delete(f"{SESSION_KEY_PREFIX}{session_id}")
+    except Exception:
+        pass
+    return {"cleared": session_id}

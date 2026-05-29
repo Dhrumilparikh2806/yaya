@@ -79,6 +79,10 @@ def process_file(self, job_id: str):
                 log.error("process_file_job_not_found", job_id=job_id)
                 return
 
+            if job.status == JobStatus.completed:
+                log.info("process_file_already_completed", job_id=job_id)
+                return
+
             try:
                 span.set_attribute("file_type", job.file_type)
                 span.set_attribute("user_id", str(job.user_id))
@@ -112,21 +116,16 @@ def process_file(self, job_id: str):
                 # ── Chunking ──────────────────────────────────────────────
                 update_job_state(db, job_id, JobStatus.processing, step="chunking")
 
-                from app.rag.chunker import chunk_text, chunk_video_segments
+                from app.rag.chunker import chunk_markdown_hierarchical
 
-                if file_type in ("video", "audio"):
-                    result_dict = json.loads(job.result) if job.result else {}
-                    segments = result_dict.get("segments", [])
-                    chunks = chunk_video_segments(segments, job_id, job.filename)
-                else:
-                    chunks = chunk_text(
-                        extracted_text,
-                        job_id=job_id,
-                        filename=job.filename,
-                        file_type=file_type,
-                        chunk_size=settings.CHUNK_SIZE,
-                        overlap=settings.CHUNK_OVERLAP,
-                    )
+                chunks = chunk_markdown_hierarchical(
+                    extracted_text,
+                    job_id=job_id,
+                    filename=job.filename,
+                    file_type=file_type,
+                    parent_size=settings.CHUNK_SIZE,
+                    child_size=settings.CHILD_CHUNK_SIZE,
+                )
 
                 if not chunks:
                     log.warning("no_chunks_produced", job_id=job_id, file_type=file_type)
@@ -144,10 +143,12 @@ def process_file(self, job_id: str):
 
                 if chunks and embeddings:
                     from app.rag.vectorstore import get_chroma_client, get_or_create_collection, delete_job_chunks, add_chunks
+                    from app.rag.bm25_index import invalidate_bm25
                     client = get_chroma_client(settings)
                     collection = get_or_create_collection(client, settings)
                     delete_job_chunks(collection, job_id)
                     add_chunks(collection, chunks, embeddings)
+                    invalidate_bm25(settings)  # force BM25 rebuild on next query
 
                 # ── Complete ──────────────────────────────────────────────
                 update_job_state(
