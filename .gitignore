@@ -23,3 +23,7 @@ chroma/
 .claude/
 C:/tmp/
 
+# Development test datasets — not part of the deliverable
+Doc/
+Docx/
+
