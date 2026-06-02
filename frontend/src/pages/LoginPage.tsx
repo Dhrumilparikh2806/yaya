@@ -2,6 +2,12 @@ import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
+const BULLETS = [
+  "Cited, grounded answers — no hallucinations",
+  "Upload PDFs, DOCX, and text in seconds",
+  "Multi-doc reasoning with source attribution",
+];
+
 export default function LoginPage() {
   const { login } = useAuth();
   const nav = useNavigate();
@@ -12,41 +18,117 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(""); setLoading(true);
+    setError("");
+    setLoading(true);
     try {
       await login(email, password);
       nav("/upload");
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };
       setError(e.response?.data?.detail || "Login failed");
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-      <div className="bg-white rounded-2xl shadow p-8 w-full max-w-md">
-        <h1 className="text-2xl font-bold mb-6 text-gray-800">Sign in to GeminiRAG</h1>
-        {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded px-4 py-2 mb-4 text-sm">{error}</div>}
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-            <input className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              type="email" value={email} onChange={e => setEmail(e.target.value)} required />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
-            <input className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              type="password" value={password} onChange={e => setPassword(e.target.value)} required />
-          </div>
-          <button disabled={loading}
-            className="w-full bg-indigo-600 text-white rounded-lg py-2 font-medium hover:bg-indigo-700 disabled:opacity-50">
-            {loading ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
-        <p className="mt-4 text-sm text-center text-gray-500">
-          No account? <Link to="/register" className="text-indigo-600 hover:underline">Register</Link>
-        </p>
-      </div>
+    <div className="auth-wrap">
+      <aside className="auth-aside">
+        <div className="glow" />
+
+        {/* Logo — top */}
+        <div className="a-logo">
+          <span className="mark" />
+          GeminiRAG
+        </div>
+
+        {/* Main content — middle */}
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <h2>
+            Knowledge,<br />retrieved.
+          </h2>
+          <p style={{ color: "rgba(255,255,255,.65)", marginTop: 18, fontSize: 15.5, lineHeight: 1.55 }}>
+            Upload, query, and reason across your documents with grounded AI — fast, measurable, and built to scale.
+          </p>
+          <ul style={{ listStyle: "none", marginTop: 28, display: "flex", flexDirection: "column", gap: 14, padding: 0 }}>
+            {BULLETS.map((text) => (
+              <li key={text} style={{ display: "flex", gap: 11, alignItems: "center", color: "#fff", fontSize: 14.5 }}>
+                <span style={{ width: 22, height: 22, borderRadius: 99, background: "rgba(41,232,132,.18)", display: "grid", placeItems: "center", flexShrink: 0 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: 99, background: "var(--mint)" }} />
+                </span>
+                {text}
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {/* Version — bottom */}
+        <div className="aside-ver">v2.4 · secure workspace</div>
+
+        <div className="auth-hex" />
+      </aside>
+
+      <main className="auth-main">
+        <div className="auth-card">
+          <h1>Sign in</h1>
+          <p className="sub">Welcome back. Enter your credentials to continue.</p>
+
+          <form onSubmit={handleSubmit}>
+            <div className="field">
+              <label htmlFor="login-email">Email</label>
+              <input
+                id="login-email"
+                className="input"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="field">
+              <label htmlFor="login-password">Password</label>
+              <input
+                id="login-password"
+                className="input"
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+            </div>
+
+            {error && (
+              <div
+                style={{
+                  background: "var(--err-bg)",
+                  color: "var(--err-fg)",
+                  borderRadius: 8,
+                  padding: "10px 14px",
+                  fontSize: 13.5,
+                  marginBottom: 4,
+                }}
+              >
+                {error}
+              </div>
+            )}
+
+            <button
+              className="btn btn-mint btn-block"
+              type="submit"
+              disabled={loading}
+            >
+              {loading ? "Signing in…" : "Sign in"}
+            </button>
+          </form>
+
+          <p className="auth-foot">
+            No account? <Link to="/register">Register</Link>
+          </p>
+        </div>
+      </main>
     </div>
   );
 }

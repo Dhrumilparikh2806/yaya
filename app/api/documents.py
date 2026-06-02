@@ -1,3 +1,15 @@
+"""
+Document endpoints.
+
+GET /v1/documents               — list all completed documents that produced at
+                                  least one chunk (chunk_count > 0).  Shared
+                                  across all authenticated users.
+GET /v1/documents/{id}/summary  — return the structured summary JSON stored in
+                                  Job.result by the processor (title, key_points,
+                                  speakers, sheets, etc. — format varies by
+                                  file type).
+"""
+
 import json
 import uuid
 

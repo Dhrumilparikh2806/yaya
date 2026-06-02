@@ -1,3 +1,13 @@
+"""
+Authentication endpoints.
+
+POST /auth/register — create a user account (email + password + role).
+                      Duplicate email returns HTTP 409.
+POST /auth/login    — validate credentials and return a signed JWT.
+                      Rate-limited to 10 requests/minute per IP to slow
+                      brute-force attacks.
+"""
+
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status

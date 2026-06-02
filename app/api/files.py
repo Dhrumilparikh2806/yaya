@@ -1,3 +1,16 @@
+"""
+File upload endpoint.
+
+POST /v1/files/upload
+  - Validates file extension against EXTENSION_MAP (returns 400 for unsupported).
+  - Enforces 500 MB hard limit (returns 413).
+  - Sanitises the filename (strips directory components to prevent path traversal).
+  - Saves the file to UPLOAD_DIR/<job_uuid>/<filename>.
+  - Creates a Job row in PostgreSQL (status=PENDING, step='queued').
+  - Enqueues process_file.delay(job_id) on the Celery queue.
+  - Returns 202 Accepted with {job_id, filename, file_type, status}.
+"""
+
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -24,11 +37,20 @@ EXTENSION_MAP = {
     ".jpg": "image",
     ".jpeg": "image",
     ".webp": "image",
+    # video
     ".mp4": "video",
     ".mov": "video",
+    ".avi": "video",
+    ".mkv": "video",
+    ".m4v": "video",
+    ".webm": "video",
+    # audio
     ".mp3": "audio",
     ".wav": "audio",
     ".m4a": "audio",
+    ".aac": "audio",
+    ".flac": "audio",
+    ".ogg": "audio",
 }
 
 MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB

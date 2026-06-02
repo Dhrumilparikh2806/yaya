@@ -1,3 +1,12 @@
+"""
+Password hashing and JWT token utilities.
+
+hash_password   — bcrypt hash (cost factor from bcrypt default, currently 12).
+verify_password — constant-time bcrypt comparison.
+create_access_token — signs an HS256 JWT containing {sub, role, exp}.
+decode_token    — verifies signature and expiry; raises HTTP 401 on any failure.
+"""
+
 from datetime import datetime, timedelta
 
 import bcrypt

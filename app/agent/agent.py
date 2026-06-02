@@ -1,6 +1,41 @@
+"""
+Groq-powered document chat agent with Redis-backed session history.
+
+Architecture
+------------
+run_agent() is the single entry point called by the /v1/agent/chat endpoint.
+
+1. Intent classification (deterministic, no LLM):
+     chitchat   — greetings and social filler → skip retrieval.
+     list_docs  — "how many documents / files" → call list_documents() tool.
+     job_status — message contains a UUID and status/progress keywords →
+                  call get_job_status() tool.
+     rag_query  — everything else → hybrid ChromaDB retrieval.
+
+2. Context injection:
+     The retrieved data (document list, job status, or chunk excerpts) is
+     appended to the user message inside <document_list>, <job_status>, or
+     <context> XML tags.  The system prompt instructs the LLM to cite chunks
+     and refuse to answer from outside the provided context.
+
+3. Single Groq LLM call (SYNTHESIS_MODEL = llama-3.1-8b-instant):
+     The assembled message history (system + last 10 turns + current user
+     message with injected context) is sent in one request.
+
+4. Session persistence:
+     Full unbounded history is saved to Redis (SESSION_TTL = 7 days).
+     Only the last 10 messages are included in the LLM window to cap
+     context length.  The injected context is stripped before saving so
+     history stays compact.
+
+_retrieve_chunks() runs the same hybrid search (vector + BM25 + RRF +
+cross-encoder rerank) as the main RAG engine, gated by CONFIDENCE_THRESHOLD.
+"""
+
 import json
 import re
 import uuid as _uuid
+from datetime import date as _date
 
 import groq as groq_sdk
 import redis as redis_sdk
@@ -52,20 +87,30 @@ _AGENT_TOP_K = 5
 _CHUNK_EXCERPT = 600  # chars per chunk (400-word chunks are smaller, show more)
 
 
-def _retrieve_chunks(question: str) -> list[dict]:
-    """Hybrid search: vector + BM25 via RRF. Returns top-k chunks with scores."""
+def _retrieve_chunks(question: str) -> tuple[list[dict], float]:
+    """Hybrid search: vector + BM25 via RRF. Returns (top-k chunks, top_vector_score).
+
+    The top_vector_score is the cosine similarity of the best vector hit and is
+    used for the confidence gate.  RRF scores (on the merged chunks) are much
+    smaller and must NOT be used for the threshold check.
+    """
     from app.rag.embedder import embed_query
     from app.rag.vectorstore import get_chroma_client, get_or_create_collection, search, rrf_merge
     from app.rag.bm25_index import load_bm25, build_bm25, search_bm25
+    from app.rag.reranker import rerank
 
     q_emb = embed_query(question, settings)
     client = get_chroma_client(settings)
     col = get_or_create_collection(client, settings)
 
     vector_chunks = search(col, q_emb, top_k=_AGENT_TOP_K * 2)
+    # Capture cosine similarity BEFORE rrf_merge overwrites the score field
+    top_vector_score = vector_chunks[0]["score"] if vector_chunks else 0.0
+
     index_data = load_bm25(settings) or build_bm25(col, settings)
     bm25_chunks = search_bm25(index_data, question, top_k=_AGENT_TOP_K * 2)
-    return rrf_merge(vector_chunks, bm25_chunks, top_k=_AGENT_TOP_K)
+    rrf_chunks = rrf_merge(vector_chunks, bm25_chunks, top_k=_AGENT_TOP_K * 2)
+    return rerank(question, rrf_chunks, top_k=_AGENT_TOP_K), top_vector_score
 
 
 def _build_context_block(chunks: list[dict]) -> str:
@@ -89,7 +134,19 @@ _GREETING_RE = re.compile(
 )
 
 _LIST_DOCS_RE = re.compile(
-    r"\b(?:list|show|what|which|how\s+many)\b.{0,25}\b(?:documents?|files?|uploaded|available|processed)\b",
+    r"("
+    # doc count / list queries
+    r"\b(?:list|show|what|which|how\s+many|tell\s+me|count|number\s+of|how\s+much)\b"
+    r".{0,30}"
+    r"\b(?:documents?|files?|uploaded|available|processed|stored|indexed|in\s+(?:the\s+)?(?:database|db|system|pipeline))\b"
+    r"|"
+    # chunk / embed / vector stats queries
+    r"\b(?:how\s+many|what\s+is\s+the|total|count\s+of)\b.{0,20}"
+    r"\b(?:chunks?|embeddings?|vectors?|embedded|indexed|pieces?)\b"
+    r"|"
+    # "stats / statistics" queries
+    r"\b(?:stats?|statistics|pipeline\s+info|system\s+info)\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -135,6 +192,12 @@ When document context is provided between <context> tags:
 - If the answer is not in the context, say: "I don't have that information in the provided documents."
 - Never guess, infer, or use outside knowledge.
 
+When a <document_list> is provided:
+- Report "total_documents" as the exact document count.
+- Report "total_chunks_embedded" as the total embedded chunk count.
+- Do NOT mention list limits, truncation, or implementation details.
+- Just state the numbers clearly and naturally.
+
 Use conversation history to resolve follow-up questions (e.g. "what about them?" refers to the last entity discussed).
 For greetings and chitchat, respond naturally without referencing documents."""
 
@@ -172,7 +235,13 @@ async def run_agent(message: str, user_id: str, session_id: str | None = None) -
     if intent == "list_docs":
         result = list_documents()
         tool_names_called.append("list_documents")
-        context_injection = f"\n\n<document_list>\n{json.dumps(result, indent=2)}\n</document_list>"
+        today = _date.today().strftime("%B %d, %Y")
+        context_injection = (
+            f"\n\n<document_list>\n"
+            f"Today's date: {today}\n"
+            f"{json.dumps(result, indent=2)}\n"
+            f"</document_list>"
+        )
 
     elif intent == "job_status":
         job_id = _extract_uuid(message)
@@ -185,20 +254,18 @@ async def run_agent(message: str, user_id: str, session_id: str | None = None) -
 
     if intent == "rag_query":
         try:
-            chunks = _retrieve_chunks(message)
-            if chunks:
-                avg_score = sum(c["score"] for c in chunks) / len(chunks)
-                if avg_score >= settings.CONFIDENCE_THRESHOLD:
-                    context_block = _build_context_block(chunks)
-                    context_injection = f"\n\n<context>\n{context_block}\n</context>"
-                    tool_names_called.append("query_rag")
-                    log.info(
-                        "agent_rag_retrieved",
-                        chunks=len(chunks),
-                        avg_score=round(avg_score, 4),
-                    )
-                else:
-                    log.info("agent_rag_low_confidence", avg_score=round(avg_score, 4))
+            chunks, top_vector_score = _retrieve_chunks(message)
+            if chunks and top_vector_score >= settings.CONFIDENCE_THRESHOLD:
+                context_block = _build_context_block(chunks)
+                context_injection = f"\n\n<context>\n{context_block}\n</context>"
+                tool_names_called.append("query_rag")
+                log.info(
+                    "agent_rag_retrieved",
+                    chunks=len(chunks),
+                    top_vector_score=round(top_vector_score, 4),
+                )
+            elif chunks:
+                log.info("agent_rag_low_confidence", top_vector_score=round(top_vector_score, 4))
         except Exception as exc:
             log.error("agent_rag_error", error=str(exc)[:200])
 

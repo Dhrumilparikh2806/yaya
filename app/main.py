@@ -1,3 +1,16 @@
+"""
+FastAPI application factory.
+
+Responsibilities:
+- Configures structlog and OpenTelemetry on startup.
+- Registers CORS, slowapi rate-limiting, and per-request JSON logging middleware.
+- Warms up fastembed (ONNX Runtime) synchronously in the main thread at startup
+  to avoid a crash on Python 3.13+ when it first loads inside a thread-pool worker.
+- Mounts all API routers under /auth and /v1.
+- Exposes a /health endpoint that probes PostgreSQL and ChromaDB.
+"""
+
+import os
 import time
 import uuid as _uuid
 
@@ -66,6 +79,43 @@ def create_app() -> FastAPI:
     app.include_router(documents.router, prefix="/v1", tags=["documents"])
     app.include_router(admin.router, prefix="/v1/admin", tags=["admin"])
     app.include_router(agent.router, prefix="/v1", tags=["agent"])
+
+    @app.on_event("startup")
+    def warmup_models():
+        """Warm up native-code models at startup.
+
+        fastembed (ONNX Runtime) is loaded synchronously in the main thread —
+        it must be initialised here because ONNX Runtime crashes when first called
+        from a uvicorn thread-pool worker on Python 3.13+.
+
+        The sentence-transformers CrossEncoder (reranker) is loaded asynchronously
+        in a daemon background thread because its Rust tokenizer deadlocks when
+        stdout is not a TTY. It sets a threading.Event when ready; queries wait up
+        to 60 s for it, then fall back to returning un-reranked top-k results.
+        """
+        from app.config import settings as _s
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        os.environ["TQDM_DISABLE"] = "1"
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+        # 1. fastembed — synchronous, must run in main thread
+        try:
+            from app.rag.embedder import embed_query
+            embed_query("startup warmup", _s)
+            get_logger().info("startup_embed_warmup_done", model=_s.EMBEDDING_MODEL)
+        except Exception as exc:
+            get_logger().warning("startup_embed_warmup_failed", error=str(exc))
+
+        # 2. Reranker — loads lazily on first query. Disabled on Python 3.13+
+        #    due to native crash in sentence-transformers with non-TTY stdout.
+        #    Set GEMINIRAG_RERANKER=1 to force-enable (Docker / Python 3.11 only).
+        import sys as _sys
+        if _sys.version_info >= (3, 13):
+            get_logger().info("startup_reranker_disabled",
+                              reason="python_313_compat",
+                              override_env="GEMINIRAG_RERANKER=1")
+
+        get_logger().info("startup_complete")
 
     @app.get("/health")
     def health():

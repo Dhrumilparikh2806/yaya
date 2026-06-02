@@ -1,3 +1,13 @@
+"""
+Agent conversation endpoints.
+
+POST /v1/agent/chat               — multi-turn document chat powered by Groq.
+                                    Accepts an optional session_id; creates a
+                                    new UUID session if not provided.  Session
+                                    history is stored in Redis (7-day TTL).
+DELETE /v1/agent/session/{id}     — clear a specific session's history from Redis.
+"""
+
 from typing import Optional
 
 from fastapi import APIRouter, Depends

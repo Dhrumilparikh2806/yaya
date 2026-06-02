@@ -1,3 +1,14 @@
+"""
+PDF file processor.
+
+Extracts text and tables page by page with pdfplumber.  Each page becomes a
+'## Page N' markdown section so the chunker can split on page boundaries and
+citations reference page numbers.  Tables are converted to markdown inline.
+
+The LLM summary (title, document_type, key_points, risks, entities,
+tables_found) is produced by a single Groq call after full extraction.
+"""
+
 import pdfplumber
 
 from app.processors.base import BaseProcessor

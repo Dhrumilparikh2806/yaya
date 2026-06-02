@@ -1,83 +1,114 @@
 # GeminiRAG
 
-GeminiRAG is a multimodal Retrieval-Augmented Generation (RAG) pipeline built with Google Gemini, FastAPI, ChromaDB, and Celery. It accepts PDF, DOCX, XLSX, CSV, image, video, and audio uploads, extracts and chunks content using Gemini multimodal models, stores embeddings in ChromaDB, and answers natural-language questions with cited, confidence-gated responses.
+A production-ready multimodal Retrieval-Augmented Generation (RAG) pipeline. Accepts PDF, DOCX, XLSX, CSV, image, audio, and video uploads; extracts and chunks content with Groq LLMs; stores embeddings in ChromaDB; and answers natural-language questions with cited, confidence-gated responses.
 
-The system includes a Google ADK-powered conversational agent with five MCP tools, a full-featured React/TypeScript frontend, structured JSON observability logging, RAGAS evaluation metrics for every query, and an admin dashboard showing per-user token spend, endpoint latency, and RAGAS score trends.
+Includes a Groq-powered conversational agent with Redis-backed session history, a React/TypeScript admin dashboard, structured JSON observability, RAGAS quality evaluation on every query, and per-user token cost tracking.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        React Frontend                           │
-│          Login / Upload / Query / Jobs / Agent / Admin          │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ HTTP (Axios + Bearer JWT)
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     FastAPI (port 8000)                         │
-│  /auth  /v1/files  /v1/query  /v1/jobs  /v1/agent  /v1/admin   │
-│  slowapi rate limiting · structlog JSON · OpenTelemetry traces  │
-└──────┬──────────────┬─────────────────────┬─────────────────────┘
-       │              │                     │
-       ▼              ▼                     ▼
-┌────────────┐ ┌────────────────┐  ┌───────────────────────┐
-│ PostgreSQL │ │  Redis (queue) │  │  ChromaDB (vectors)   │
-│  jobs      │ │                │  │  geminirag_chunks      │
-│  users     │ └───────┬────────┘  └───────────────────────┘
-│  usage_logs│         │                     ▲
-│  query_hist│         ▼                     │
-└────────────┘ ┌────────────────┐   embeddings│
-               │ Celery Worker  │             │
-               │                │─────────────┘
-               │  extract text  │
-               │  chunk content │
-               │  call Gemini   │──► Gemini API (multimodal)
-               │  embed chunks  │
-               └────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                      React Frontend (Vite)                        │
+│        Login / Upload / Query / Jobs / Agent / Admin             │
+└───────────────────────────┬──────────────────────────────────────┘
+                            │  HTTP · Bearer JWT
+                            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    FastAPI  :8000                                 │
+│  /auth  /v1/files  /v1/query  /v1/jobs  /v1/agent  /v1/admin    │
+│  slowapi rate-limiting · structlog JSON · OpenTelemetry traces   │
+└──────┬────────────────┬──────────────────────┬───────────────────┘
+       │                │                      │
+       ▼                ▼                      ▼
+┌────────────┐  ┌──────────────┐   ┌──────────────────────────┐
+│ PostgreSQL │  │ Redis        │   │ ChromaDB  :8001           │
+│  users     │  │  task queue  │   │  geminirag_chunks         │
+│  jobs      │  │  BM25 cache  │   │  (cosine similarity)      │
+│  usage_logs│  │  agent sess. │   └──────────────────────────┘
+│  query_hist│  └──────┬───────┘              ▲
+└────────────┘         │                      │ BAAI/bge-small-en
+                       ▼                      │ embeddings (local)
+               ┌──────────────┐               │
+               │ Celery Worker│───────────────┘
+               │              │
+               │  extract     │──► Groq Whisper  (audio/video)
+               │  summarise   │──► Groq LLM      (text processing)
+               │  chunk       │──► Groq Vision   (images/frames)
+               │  embed       │──► fastembed     (local, no API)
+               │  index       │
+               └──────────────┘
 
-               ┌────────────────────────────────┐
-               │  Google ADK Agent              │
-               │  POST /v1/agent/chat           │
-               │  Tools: ingest_file            │
-               │         get_job_status         │
-               │         query_rag              │
-               │         list_documents         │
-               │         summarize_document     │
-               └────────────────────────────────┘
+Query path (per request):
+  question → embed → vector search + BM25 → RRF merge
+           → cross-encoder rerank → confidence gate
+           → Groq LLM (answer) → save QueryHistory
+           → async RAGAS evaluation (Celery)
+
+Agent path:
+  message → intent classify → ChromaDB retrieve
+          → Groq LLM synthesis → Redis session persist
 ```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| API framework | FastAPI 0.111+ |
+| Primary LLM | Groq — `llama-3.3-70b-versatile` (RAG / agent) |
+| Processing LLM | Groq — `llama-3.1-8b-instant` (extraction, summaries, RAGAS) |
+| Vision LLM | Groq — `meta-llama/llama-4-scout-17b-16e-instruct` (images, frames) |
+| Speech-to-text | Groq Whisper — `whisper-large-v3` (audio / video) |
+| Speaker diarization | SpeechBrain ECAPA-VOXCELEB (local model) |
+| Embeddings | BAAI/bge-small-en-v1.5 via fastembed (local, no API cost) |
+| Vector store | ChromaDB (HTTP, cosine similarity) |
+| Sparse retrieval | BM25 (built from ChromaDB data, cached in Redis) |
+| Reranker | sentence-transformers cross-encoder (local) |
+| Task queue | Celery 5.3+ + Redis |
+| Database | PostgreSQL 16 + SQLModel + Alembic |
+| RAG evaluation | RAGAS (async, per query) |
+| Observability | structlog (JSON) + OpenTelemetry |
+| Auth | JWT HS256 (python-jose) + bcrypt |
+| Rate limiting | slowapi |
+| Streaming query | Gemini API (optional — `GEMINI_API_KEY` required only for `/v1/query/stream`) |
+| Frontend | React 18 + TypeScript + Vite + TailwindCSS + Recharts |
+| Containerisation | Docker + Docker Compose |
 
 ---
 
 ## Prerequisites
 
-| Requirement | Version |
-|---|---|
-| Python | 3.11+ |
-| Node.js | 18+ |
-| Docker Desktop | latest |
-| Gemini API key | from [aistudio.google.com](https://aistudio.google.com) |
+| Requirement | Version | Notes |
+|---|---|---|
+| Python | 3.11+ | 3.13 disables the cross-encoder reranker |
+| Node.js | 18+ | Frontend only |
+| PostgreSQL | 16 | Can run native or via Docker |
+| Redis | 7+ | Celery broker + BM25 cache + agent sessions |
+| ChromaDB | 0.5+ | Must run as HTTP server on port 8001 |
+| Groq API key | — | Required — free tier sufficient for dev |
+| Gemini API key | — | Optional — only needed for `/v1/query/stream` |
 
 ---
 
 ## Setup
 
+### Local development
+
 ```bash
-# 1. Clone
-git clone <repo-url>
-cd geminirag
-
-# 2. Create environment file
+# 1. Copy and fill in the environment file
 cp .env.example .env
-# Edit .env and fill in:
-#   GEMINI_API_KEY=your_key_here
-#   SECRET_KEY=a_long_random_string
-#   DATABASE_URL=postgresql://geminirag:geminirag@localhost:5432/geminirag
-#   REDIS_URL=redis://localhost:6379/0
+# Required: GROQ_API_KEY, SECRET_KEY, DATABASE_URL, REDIS_URL
+# See "Environment Variables" section below
 
-# 3. Start infrastructure
-docker compose up -d postgres redis chromadb
+# 2. Start Redis and ChromaDB
+docker compose up -d redis chromadb
+
+# 3. Create the PostgreSQL database (if not using Docker)
+createdb geminirag
+createuser geminirag --password geminirag
 
 # 4. Install Python dependencies
 pip install -e .
@@ -85,49 +116,76 @@ pip install -e .
 # 5. Run database migrations
 alembic upgrade head
 
-# 6. Start the API server
-uvicorn app.main:app --reload --port 8000
+# 6. Seed an admin user
+py scripts/seed_admin.py --email admin@example.com --password changeme
 
-# 7. Start the Celery worker (separate terminal)
-celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+# 7. Start the API server  (terminal 1)
+py -m uvicorn app.main:app --reload --port 8000
+
+# 8. Start the Celery worker  (terminal 2)
+py -m celery -A app.workers.celery_app worker --loglevel=info --pool=solo
+
+# 9. Start the frontend  (terminal 3)
+cd frontend && npm install && npm run dev
+# → http://localhost:5173
 ```
 
-Or start everything via Docker:
+### Docker (all-in-one)
 
 ```bash
 docker compose up --build
+# API → http://localhost:8000
+# Frontend → http://localhost:5173
 ```
 
----
-
-## Running the Frontend
+Production:
 
 ```bash
-cd frontend
-npm install
-npm run dev
-# Opens at http://localhost:5173
+docker compose -f docker-compose.prod.yml up --build
 ```
 
 ---
 
 ## Environment Variables
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `GEMINI_API_KEY` | yes | — | Google Gemini API key |
-| `SECRET_KEY` | yes | — | JWT signing secret (min 32 chars) |
-| `DATABASE_URL` | yes | — | PostgreSQL connection string |
-| `REDIS_URL` | yes | — | Redis connection string |
-| `CHROMA_HOST` | no | `localhost` | ChromaDB host |
-| `CHROMA_PORT` | no | `8001` | ChromaDB port |
-| `ALLOWED_ORIGINS` | no | `http://localhost:5173` | Comma-separated CORS origins |
-| `GEMINI_MODEL` | no | `gemini-2.0-flash` | Gemini model for processing |
-| `GEMINI_EMBEDDING_MODEL` | no | `models/text-embedding-004` | Embedding model |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | no | `60` | JWT lifetime |
-| `RAG_TOP_K` | no | `5` | Number of chunks retrieved per query |
-| `CONFIDENCE_THRESHOLD` | no | `0.65` | Min score to pass confidence gate |
-| `UPLOAD_DIR` | no | `/tmp/geminirag_uploads` | File storage path |
+### Required (P0)
+
+| Variable | Description |
+|---|---|
+| `GROQ_API_KEY` | Groq API key — used for all LLM and Whisper calls |
+| `SECRET_KEY` | JWT signing secret — minimum 32 random characters |
+| `DATABASE_URL` | PostgreSQL connection string e.g. `postgresql://user:pass@host:5432/db` |
+| `REDIS_URL` | Redis connection string e.g. `redis://localhost:6379/0` |
+
+### Optional (P1 — defaults provided)
+
+| Variable | Default | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | `""` | Required only for `/v1/query/stream` (SSE streaming) |
+| `CHROMA_HOST` | `localhost` | ChromaDB server host |
+| `CHROMA_PORT` | `8001` | ChromaDB server port |
+| `CHROMA_COLLECTION` | `geminirag_chunks` | ChromaDB collection name |
+| `ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated CORS origins |
+| `UPLOAD_DIR` | `/tmp/geminirag_uploads` | File storage root |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `60` | JWT lifetime |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Model for RAG answer generation |
+| `GROQ_PROCESSING_MODEL` | `llama-3.1-8b-instant` | Model for extraction, summaries, RAGAS |
+| `GROQ_VISION_MODEL` | `meta-llama/llama-4-scout-17b-16e-instruct` | Model for image/frame OCR |
+| `WHISPER_MODEL` | `whisper-large-v3` | Model for audio transcription |
+| `WHISPER_LANGUAGE` | `""` | Force Whisper language (e.g. `en`). Empty = auto-detect |
+| `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model (runs locally) |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model for SSE streaming |
+| `CHUNK_SIZE` | `600` | Parent chunk size in words |
+| `CHILD_CHUNK_SIZE` | `150` | Child chunk size in words (indexed in ChromaDB) |
+| `CHUNK_OVERLAP` | `50` | Overlap in words between chunks |
+| `RAG_TOP_K` | `8` | Chunks retrieved per query |
+| `CONFIDENCE_THRESHOLD` | `0.4` | Min cosine similarity to pass the confidence gate |
+| `DIARIZATION_THRESHOLD` | `0.4` | AgglomerativeClustering distance threshold for speakers |
+| `VIDEO_FRAME_INTERVAL` | `60` | Seconds between extracted video frames |
+| `MAX_AUDIO_CHUNK_MB` | `20` | Max audio chunk size before splitting for Whisper |
+| `CELERY_MAX_RETRIES` | `3` | Max Celery task retry attempts |
+| `CELERY_RETRY_BACKOFF` | `60` | Base seconds for exponential retry backoff |
+| `OTEL_SERVICE_NAME` | `geminirag` | OpenTelemetry service name |
 
 ---
 
@@ -135,21 +193,37 @@ npm run dev
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/auth/register` | none | Create user account |
-| `POST` | `/auth/login` | none | Obtain JWT (rate-limited: 10/min) |
-| `POST` | `/v1/files/upload` | user | Upload a file, enqueue processing job |
-| `GET` | `/v1/jobs` | user | List jobs (user sees own; admin sees all) |
-| `GET` | `/v1/jobs/{id}` | user | Get single job status |
-| `GET` | `/v1/documents` | user | List completed documents |
-| `GET` | `/v1/documents/{id}/summary` | user | Get document summary |
-| `POST` | `/v1/query` | user | RAG query with citations and RAGAS scores |
-| `POST` | `/v1/agent/chat` | user | ADK agent conversation turn |
-| `GET` | `/v1/admin/usage` | admin | Token usage stats by day/user/endpoint |
-| `GET` | `/v1/admin/ragas` | admin | RAGAS metric averages and trends |
+| `POST` | `/auth/register` | none | Create user account (`role`: `user` or `admin`) |
+| `POST` | `/auth/login` | none | Obtain JWT — rate-limited 10/min |
+| `POST` | `/v1/files/upload` | user | Upload file, enqueue processing job |
+| `GET` | `/v1/jobs` | user | List all jobs |
+| `GET` | `/v1/jobs/{id}` | user | Get job status and step |
+| `POST` | `/v1/jobs/{id}/reprocess` | user | Re-queue a job |
+| `GET` | `/v1/documents` | user | List completed documents (chunk_count > 0) |
+| `GET` | `/v1/documents/{id}/summary` | user | Structured summary JSON from processor |
+| `POST` | `/v1/query` | user | RAG query — returns answer + citations + RAGAS |
+| `POST` | `/v1/query/stream` | user | Streaming RAG via SSE (requires `GEMINI_API_KEY`) |
+| `POST` | `/v1/agent/chat` | user | Multi-turn agent conversation |
+| `DELETE` | `/v1/agent/session/{id}` | user | Clear agent session history |
+| `GET` | `/v1/admin/usage` | admin | Token/latency stats by day, user, endpoint |
+| `GET` | `/v1/admin/ragas` | admin | RAGAS metric averages and 7-day trends |
 | `GET` | `/v1/admin/users` | admin | All users with query/token/job counts |
-| `PATCH` | `/v1/admin/users/{id}` | admin | Toggle user active/inactive |
-| `GET` | `/v1/admin/logs` | admin | Raw usage log entries |
-| `GET` | `/health` | none | Health check |
+| `PATCH` | `/v1/admin/users/{id}` | admin | Toggle user `is_active` |
+| `GET` | `/v1/admin/logs` | admin | Raw `UsageLog` entries (filterable) |
+| `GET` | `/health` | none | DB + ChromaDB liveness check |
+
+### Example: Register and log in
+
+```bash
+curl -X POST http://localhost:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "Str0ng!", "role": "user"}'
+
+TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "Str0ng!"}' \
+  | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
 
 ### Example: Upload a file
 
@@ -160,13 +234,21 @@ curl -X POST http://localhost:8000/v1/files/upload \
 # → {"job_id": "...", "filename": "report.pdf", "file_type": "pdf", "status": "PENDING"}
 ```
 
+### Example: Poll job until complete
+
+```bash
+curl http://localhost:8000/v1/jobs/<JOB_ID> -H "Authorization: Bearer $TOKEN"
+# → {"status": "COMPLETED", "step": "completed", "chunk_count": 14, ...}
+```
+
 ### Example: RAG query
 
 ```bash
 curl -X POST http://localhost:8000/v1/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"question": "What were the main findings?", "job_ids": ["..."]}'
+  -d '{"question": "What were the key findings?", "job_ids": ["<JOB_ID>"]}'
+# → {"answer": "...[1]...", "citations": [...], "confidence_gate_passed": true, ...}
 ```
 
 ### Example: Agent chat
@@ -175,7 +257,7 @@ curl -X POST http://localhost:8000/v1/query \
 curl -X POST http://localhost:8000/v1/agent/chat \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"message": "Ingest /tmp/geminirag_uploads/abc/report.pdf and summarise it"}'
+  -d '{"message": "How many documents are in the system?"}'
 ```
 
 ---
@@ -184,69 +266,125 @@ curl -X POST http://localhost:8000/v1/agent/chat \
 
 | Type | Extensions | Processing |
 |---|---|---|
-| PDF | `.pdf` | Text extraction + page chunking |
-| DOCX | `.docx` | Paragraph + heading extraction |
-| XLSX / CSV | `.xlsx`, `.csv` | Sheet analysis, key insights |
-| Image | `.png`, `.jpg`, `.jpeg`, `.webp` | OCR + visual description |
-| Video | `.mp4`, `.mov` | Frame + audio extraction, diarization |
-| Audio | `.mp3`, `.wav`, `.m4a` | Transcript + speaker diarization |
+| PDF | `.pdf` | Page-by-page text + table extraction (pdfplumber) |
+| DOCX | `.docx` | Paragraph, heading, and table extraction (python-docx) |
+| XLSX / CSV | `.xlsx`, `.csv` | Multi-sheet markdown tables (openpyxl / pandas) |
+| Image | `.png`, `.jpg`, `.jpeg`, `.webp` | OCR + visual description (Groq Vision) |
+| Audio | `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg`, `.webm` | Whisper transcription + SpeechBrain ECAPA speaker diarization |
+| Video | `.mp4`, `.mov`, `.avi`, `.mkv`, `.m4v`, `.webm` | Audio track → audio pipeline; frames → image pipeline (saved to disk, processed with OCR prompt) |
+
+Max upload size: **500 MB**.
 
 ---
 
-## Running RAGAS Offline Evaluation
+## RAG Pipeline Details
 
-Create a test set file at `/tmp/ragas_test_set.json`:
+### Hierarchical Chunking
+
+Documents are split at H2 headings into sections. Each section produces two levels:
+
+- **Parent chunks** (600 words, 50-word overlap) — sent to the LLM as answer context
+- **Child chunks** (150 words, 20-word overlap) — embedded and indexed in ChromaDB
+
+At retrieval time, ChromaDB matches child chunks (precise), then the parent text is returned to the LLM (richer context).
+
+### Hybrid Search
+
+Each query runs two parallel retrievals:
+
+1. **Vector search** — cosine similarity via ChromaDB on child chunk embeddings
+2. **BM25 sparse search** — TF-IDF over the same chunks (index cached in Redis)
+
+Results are merged with **Reciprocal Rank Fusion** (k = 60), then re-ranked by a **cross-encoder** (sentence-transformers) for a final relevance ordering.
+
+### Confidence Gate
+
+The top cosine similarity score from vector search is compared against `CONFIDENCE_THRESHOLD`. If it falls below the threshold, the LLM is never called and the response is `"I couldn't find sufficiently relevant information…"`. This prevents hallucinated answers when no relevant content exists.
+
+### Audio / Video Speaker Embeddings
+
+After diarization, the ECAPA model produces a 192-dimensional speaker embedding for each identified speaker. These embeddings are stored as `speaker_embedding_json` metadata on every ChromaDB chunk from that audio/video, enabling speaker-level filtering in future queries.
+
+---
+
+## RAGAS Evaluation
+
+Every RAG query triggers an async RAGAS evaluation (via Celery). Scores are stored in `query_history.ragas_scores` and surfaced in the admin dashboard.
+
+| Metric | Requires ground truth | Measures |
+|---|---|---|
+| Faithfulness | No | Answer is grounded in retrieved context |
+| Answer Relevancy | No | Answer addresses the question |
+| Context Precision | Yes | Retrieved chunks are relevant |
+| Context Recall | Yes | Context covers ground truth information |
+| Answer Correctness | Yes | Answer matches ground truth |
+
+### Offline baseline evaluation
+
+Create a test set at `/tmp/ragas_test_set.json`:
 
 ```json
 [
   {
-    "question": "What is the main topic of the document?",
-    "ground_truth": "The document covers...",
-    "job_id": "your-job-uuid"
+    "question": "What is the main topic?",
+    "ground_truth": "The document covers ...",
+    "job_id": "<JOB_UUID>"
   }
 ]
 ```
 
-Then run:
+Run:
 
 ```bash
-python scripts/ragas_baseline.py --test-set /tmp/ragas_test_set.json
-# Results saved to /tmp/ragas_baseline.json
+py scripts/ragas_baseline.py --test-set /tmp/ragas_test_set.json
+# → /tmp/ragas_baseline.json
 ```
 
-RAGAS metrics computed:
-- **Faithfulness** — answer is grounded in retrieved context
-- **Answer Relevancy** — answer addresses the question
-- **Context Precision** — retrieved chunks are relevant
-- **Context Recall** — context covers the ground truth
-- **Answer Correctness** — answer matches ground truth
+Target baselines: Faithfulness ≥ 0.80, Answer Relevancy ≥ 0.75, Context Precision ≥ 0.70.
 
 ---
 
-## Seeding an Admin User
+## Scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/seed_admin.py` | Create an initial admin user |
+| `scripts/seed_ragas_scores.py` | Seed day-by-day RAGAS dummy data for the admin dashboard |
+| `scripts/ragas_baseline.py` | Run offline RAGAS evaluation against a test set |
 
 ```bash
-python scripts/seed_admin.py --email admin@example.com --password changeme
+# Seed admin user
+py scripts/seed_admin.py --email admin@example.com --password MyPass!
+
+# Seed RAGAS demo data (8 days, 2 rows/day)
+py scripts/seed_ragas_scores.py --rows-per-day 2
+
+# Baseline evaluation
+py scripts/ragas_baseline.py --test-set /tmp/ragas_test_set.json
 ```
 
 ---
 
-## Observability Guide
+## Observability
 
-All logs are emitted as structured JSON via structlog. Key event types:
+All logs are structured JSON emitted by structlog. Key events:
 
-| Event | Fields | When |
+| Event | Key Fields | When |
 |---|---|---|
 | `http_request` | `request_id`, `user_id`, `endpoint`, `method`, `status_code`, `latency_ms` | Every API request |
 | `file_uploaded` | `user_id`, `filename`, `file_type`, `job_id`, `file_size_bytes` | On upload |
-| `job_state_change` | `job_id`, `status`, `step`, `user_id` | Every job status transition |
-| `gemini_call` | `job_id`, `model`, `prompt_tokens`, `completion_tokens`, `latency_ms` | Every Gemini API call |
-| `rag_query` | `user_id`, `question_preview`, `num_chunks`, `confidence`, `latency_ms` | Every RAG query |
-| `tool_call` | `tool_name`, `latency_ms`, `result_preview` | Every ADK agent tool use |
-| `ragas_eval` | `query_id`, `faithfulness`, `answer_relevancy`, `latency_ms` | After RAGAS eval completes |
+| `job_state_change` | `job_id`, `from_status`, `to_status`, `step`, `retry_count` | Every job transition |
+| `llm_call` | `endpoint`, `model`, `prompt_tokens`, `completion_tokens`, `latency_ms`, `job_id` | Every Groq/Gemini/Whisper call |
+| `rag_query` | `question`, `retrieved_chunk_count`, `avg_similarity_score`, `latency_ms` | Every RAG query |
+| `ragas_computed` | `query_id`, `faithfulness`, `answer_relevancy` | After async RAGAS completes |
+| `agent_run_complete` | `user_id`, `session_id`, `intent`, `tool_call_count`, `prompt_tokens` | End of every agent turn |
+| `diarization_complete` | `speaker_count` | After audio diarization |
+| `ecapa_speaker_embeddings_computed` | `speaker_count` | After SpeechBrain embeddings computed |
 
-To filter logs by job:
+Filter logs by job ID:
+
 ```bash
+# Uvicorn / Docker logs
 docker compose logs api | python -c "
 import sys, json
 for line in sys.stdin:
@@ -258,35 +396,44 @@ for line in sys.stdin:
 "
 ```
 
+Every LLM call is also persisted to the `usage_logs` table with full token and latency detail, visible at `GET /v1/admin/logs`.
+
 ---
 
-## Tech Stack
+## Database Schema
 
-| Layer | Technology |
+| Table | Purpose |
 |---|---|
-| API framework | FastAPI 0.111 |
-| AI / LLM | Google Gemini 2.0 Flash (`google-genai`) |
-| Agent framework | Google ADK 2.0 |
-| Vector store | ChromaDB |
-| Embeddings | `models/text-embedding-004` |
-| Task queue | Celery + Redis |
-| Database | PostgreSQL 16 + SQLModel + Alembic |
-| RAG evaluation | RAGAS |
-| Observability | structlog JSON + OpenTelemetry |
-| Rate limiting | slowapi |
-| Auth | JWT (python-jose + bcrypt) |
-| Frontend framework | React 18 + TypeScript + Vite |
-| Frontend styling | TailwindCSS v3 |
-| Frontend charts | Recharts |
-| HTTP client | Axios |
-| Containerisation | Docker + Docker Compose |
+| `users` | Accounts — email, hashed password, role, active flag |
+| `jobs` | Processing jobs — status, step, retry count, error info, chunk count |
+| `usage_logs` | Every LLM/Whisper/embed API call — model, tokens, latency |
+| `query_history` | Every RAG query — answer, citations, scores, RAGAS results |
+
+---
+
+## Job State Machine
+
+```
+PENDING → PROCESSING → COMPLETED
+               │
+               └─► FAILED  (retryable, retry_count < 3)
+                      │
+                      └─► PENDING  (re-enqueued, 60 × 2ⁿ s backoff)
+                             │  (after 3 attempts)
+                             └─► FAILED_PERMANENT → Redis dead-letter queue
+```
+
+Processing steps written to `jobs.step`:
+`queued` → `extracting` → `summarising` → `chunking` → `embedding` → `indexing` → `completed`
 
 ---
 
 ## Known Limitations
 
-- **Speaker diarization accuracy** depends on audio quality; close-mic recordings with low background noise produce the best results. The Gemini diarization prompt may merge speakers if voices are similar.
-- **Large video files** (>500 MB) are rejected at upload. Processing very large files may hit Gemini's context window limits for frame extraction.
-- **RAGAS adds token cost** — every query triggers a background RAGAS evaluation that calls Gemini again. At high query volume this can be significant. Disable by removing the background task in `app/api/query.py` if cost is a concern.
-- **ChromaDB persistence** — in the default dev setup ChromaDB data lives in a Docker volume. If the volume is deleted, all embeddings are lost and documents must be re-uploaded.
-- **In-memory agent sessions** — ADK sessions use `InMemorySessionService`, so agent conversation history is lost on server restart.
+- **Speaker diarization accuracy** depends on audio quality. Mono recordings with low background noise and distinct voices produce the best results.
+- **Large video files** (> 500 MB) are rejected at upload. Near-duplicate frame skipping (> 98 % histogram similarity) reduces processing time.
+- **RAGAS token cost** — every RAG query triggers a background RAGAS evaluation. At high query volume this doubles token usage. Remove the `compute_ragas.delay()` call in `app/rag/engine.py` to disable.
+- **ChromaDB persistence** — the default dev setup stores embeddings in a Docker volume. Deleting the volume loses all embeddings; documents must be re-uploaded.
+- **Agent session window** — the LLM context is capped at the last 10 messages. Full history is persisted in Redis for 7 days but only the last 10 turns are sent to the model.
+- **Reranker on Python 3.13+** — the sentence-transformers cross-encoder is disabled on Python 3.13 due to a native tokenizer crash. Results fall back to RRF-ranked order. Force-enable with `GEMINIRAG_RERANKER=1` on Python 3.11/Docker.
+- **Streaming query requires Gemini** — `POST /v1/query/stream` (SSE) uses the Gemini SDK. Set `GEMINI_API_KEY` to use it; the standard `POST /v1/query` endpoint always uses Groq.

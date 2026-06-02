@@ -1,3 +1,15 @@
+"""
+Create or update an admin user in the database.
+
+Usage:
+    py scripts/seed_admin.py --email admin@example.com --password MyPass!
+
+If a user with that email already exists their password and role are updated.
+If no user exists a new one is created with role=admin and is_active=True.
+
+Requires DATABASE_URL to be set in .env (loaded automatically).
+"""
+
 import argparse
 import sys
 import os

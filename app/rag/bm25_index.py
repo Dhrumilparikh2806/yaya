@@ -1,3 +1,22 @@
+"""
+BM25 sparse retrieval index.
+
+The index is built from all documents currently in ChromaDB using rank_bm25
+(BM25Okapi) and stored in Redis as a pickled blob (TTL = 24 hours).
+
+Lifecycle:
+  - build_bm25()    — called when the cache is cold (after first query post-ingest).
+  - invalidate_bm25() — called by process_file after every successful indexing so
+                        the next query rebuilds from fresh ChromaDB data.
+  - load_bm25()     — returns None on cache miss; caller falls back to build_bm25().
+  - search_bm25()   — keyword search; scores are max-normalised to [0, 1] so they
+                      can be compared with vector scores inside RRF merge.
+
+Note: _tokenize() uses whitespace splitting only.  Punctuation attached to words
+(e.g. "company.") is treated as part of the token.  This is intentional — it
+keeps the tokenizer fast and avoids NLTK/spaCy as a dependency.
+"""
+
 import pickle
 
 from app.observability.logging import get_logger

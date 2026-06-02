@@ -3,23 +3,37 @@ import NavBar from "../components/NavBar";
 import api from "../api/client";
 import { useToastContext } from "../context/ToastContext";
 
-const STATUS_COLORS: Record<string, string> = {
-  PENDING: "bg-gray-200 text-gray-700",
-  PROCESSING: "bg-blue-100 text-blue-700 animate-pulse",
-  COMPLETED: "bg-green-100 text-green-700",
-  FAILED: "bg-red-100 text-red-700",
-  FAILED_PERMANENT: "bg-red-200 text-red-900",
-};
 const FILE_ICONS: Record<string, string> = {
   pdf: "📄", docx: "📝", xlsx: "📊", csv: "📊",
   image: "🖼️", video: "🎬", audio: "🎵",
 };
+
 const EXT_TO_TYPE: Record<string, string> = {
   pdf: "pdf", docx: "docx", xlsx: "xlsx", csv: "csv",
   png: "image", jpg: "image", jpeg: "image", webp: "image",
-  mp4: "video", mov: "video", avi: "video",
-  mp3: "audio", wav: "audio", m4a: "audio",
+  mp4: "video", mov: "video", avi: "video", mkv: "video", m4v: "video", webm: "video",
+  mp3: "audio", wav: "audio", m4a: "audio", aac: "audio", flac: "audio", ogg: "audio",
 };
+
+const STATUS_BADGE: Record<string, string> = {
+  COMPLETED: "badge badge-ok",
+  PROCESSING: "badge badge-warn",
+  PENDING: "badge badge-neutral",
+  FAILED: "badge badge-err",
+  FAILED_PERMANENT: "badge badge-err",
+};
+
+const FMT_TAGS = [
+  "PDF","DOCX","XLSX","CSV","PNG","JPG","WEBP",
+  "MP4","MOV","AVI","MKV","MP3","WAV","M4A","AAC","FLAC","OGG",
+];
+
+const HOWTO_STEPS = [
+  { n: "01", title: "Parse", desc: "Extract raw text, tables, and media frames from your document." },
+  { n: "02", title: "Chunk", desc: "Split content into overlapping passages sized for retrieval." },
+  { n: "03", title: "Embed", desc: "Generate semantic vector embeddings and store in the index." },
+  { n: "04", title: "Query", desc: "Run natural-language queries across all indexed documents." },
+];
 
 interface JobCard {
   job_id: string;
@@ -38,11 +52,13 @@ export default function UploadPage() {
   const [jobs, setJobs] = useState<JobCard[]>([]);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState("");
   const [drawerJob, setDrawerJob] = useState<JobCard | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const { addToast } = useToastContext();
+
+  const completedCount = jobs.filter(j => j.status === "COMPLETED").length;
+  const inQueueCount = jobs.filter(j => j.status === "PENDING" || j.status === "PROCESSING").length;
 
   const pollJob = useCallback((job_id: string, filename: string) => {
     if (pollers.current[job_id]) return;
@@ -73,7 +89,7 @@ export default function UploadPage() {
   }, [addToast]);
 
   const uploadFile = useCallback(async (file: File) => {
-    setError(""); setUploading(true);
+    setUploading(true);
     try {
       const fd = new FormData();
       fd.append("file", file);
@@ -87,9 +103,10 @@ export default function UploadPage() {
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } };
       const msg = err.response?.data?.detail || "Upload failed";
-      setError(msg);
       addToast(msg, "error");
-    } finally { setUploading(false); }
+    } finally {
+      setUploading(false);
+    }
   }, [addToast, pollJob]);
 
   const retryUpload = useCallback(async (job: JobCard) => {
@@ -98,7 +115,8 @@ export default function UploadPage() {
   }, [uploadFile]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault(); setDragging(false);
+    e.preventDefault();
+    setDragging(false);
     const file = e.dataTransfer.files[0];
     if (file) uploadFile(file);
   }, [uploadFile]);
@@ -110,112 +128,488 @@ export default function UploadPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen" style={{ background: "var(--bg)" }}>
       <NavBar />
-      <div className="max-w-2xl mx-auto px-4 py-8">
-        <h1 className="text-2xl font-bold text-gray-800 mb-6">Upload Document</h1>
 
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 rounded px-4 py-2 mb-4 text-sm flex items-center justify-between">
-            <span>{error}</span>
-            <button onClick={() => setError("")} className="font-bold ml-2">×</button>
+      <div className="page">
+        {/* Page header */}
+        <div className="page-head">
+          <div>
+            <div className="eyebrow">Knowledge Base</div>
+            <h1 className="page-title">Upload Document</h1>
+            <p className="page-sub">Add files to the RAG pipeline — parsed, chunked, and embedded automatically.</p>
           </div>
-        )}
-
-        <div
-          onDragOver={e => { e.preventDefault(); setDragging(true); }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={handleDrop}
-          onClick={() => fileInputRef.current?.click()}
-          className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-colors ${dragging ? "border-indigo-400 bg-indigo-50" : "border-gray-300 bg-white hover:border-indigo-300"}`}
-        >
-          <div className="text-4xl mb-3">📎</div>
-          <p className="text-gray-600 font-medium">Drag &amp; drop a file here, or click to browse</p>
-          <p className="text-xs text-gray-400 mt-1">PDF, DOCX, XLSX, CSV, PNG, JPG, WEBP, MP4, MOV, MP3, WAV, M4A</p>
-          {uploading && <p className="text-indigo-600 text-sm mt-2 animate-pulse">Uploading...</p>}
-          <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileChange}
-            accept=".pdf,.docx,.xlsx,.csv,.png,.jpg,.jpeg,.webp,.mp4,.mov,.avi,.mp3,.wav,.m4a" />
         </div>
 
-        <div className="mt-6 space-y-3">
-          {jobs.length === 0 && (
-            <p className="text-center text-gray-400 text-sm py-8">No uploads yet — drop a file above to get started</p>
-          )}
-          {jobs.map(j => (
-            <div key={j.job_id} className="bg-white rounded-xl shadow-sm border p-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3 min-w-0">
-                  <span className="text-2xl shrink-0">{FILE_ICONS[j.file_type] || "📄"}</span>
-                  <div className="min-w-0">
-                    <p className="font-medium text-gray-800 truncate">{j.filename}</p>
-                    {j.step && <p className="text-xs text-gray-500 mt-0.5 capitalize">{j.step.replace(/_/g, " ")}...</p>}
-                    {j.retry_count !== undefined && j.retry_count > 0 && (
-                      <p className="text-xs text-amber-600 mt-0.5">Retried {j.retry_count}×</p>
+        {/* Metric strip */}
+        <div className="metricbar" style={{ marginBottom: "1.5rem" }}>
+          <div className="m">
+            <span className="k">Documents</span>
+            <span className="v">{completedCount}</span>
+          </div>
+          <div className="m">
+            <span className="k">In queue</span>
+            <span className="v">{inQueueCount}</span>
+          </div>
+          <div className="m">
+            <span className="k">Formats supported</span>
+            <span className="v">16</span>
+          </div>
+        </div>
+
+        {/* Two-column layout */}
+        <div className="col2" style={{ marginBottom: "2rem" }}>
+          {/* Drop zone */}
+          <div
+            className="card card-pad"
+            onDragOver={e => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={handleDrop}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "1rem",
+            }}
+          >
+            <div
+              className="dropzone"
+              onClick={() => fileInputRef.current?.click()}
+              style={{
+                width: "100%",
+                border: `2px dashed ${dragging ? "var(--mint)" : "var(--line)"}`,
+                borderRadius: "12px",
+                padding: "2.5rem 1.5rem",
+                textAlign: "center",
+                cursor: "pointer",
+                background: dragging ? "var(--mint-soft)" : "var(--tile)",
+                transition: "border-color .15s, background .15s",
+              }}
+            >
+              <div style={{ fontSize: "2.25rem", marginBottom: ".5rem" }}>📎</div>
+              <p style={{ fontWeight: 600, color: "var(--ink)", marginBottom: ".25rem" }}>
+                Drag &amp; drop a file here
+              </p>
+              <p style={{ fontSize: ".8125rem", color: "var(--slate-2)", marginBottom: "1rem" }}>or</p>
+              <button
+                className="btn btn-ghost btn-sm"
+                type="button"
+                onClick={e => { e.stopPropagation(); fileInputRef.current?.click(); }}
+              >
+                {uploading ? "Uploading…" : "Browse files"}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                style={{ display: "none" }}
+                onChange={handleFileChange}
+                accept=".pdf,.docx,.xlsx,.csv,.png,.jpg,.jpeg,.webp,.mp4,.mov,.avi,.mkv,.m4v,.webm,.mp3,.wav,.m4a,.aac,.flac,.ogg"
+              />
+            </div>
+
+            {/* Format grid */}
+            <div
+              className="fmt-grid"
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: ".375rem",
+                justifyContent: "center",
+                width: "100%",
+              }}
+            >
+              {FMT_TAGS.map(tag => (
+                <span
+                  key={tag}
+                  style={{
+                    fontSize: ".6875rem",
+                    fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                    fontWeight: 600,
+                    color: "var(--teal-link)",
+                    background: "var(--mint-soft)",
+                    borderRadius: "4px",
+                    padding: "2px 6px",
+                    letterSpacing: ".02em",
+                  }}
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* How-to panel */}
+          <div className="card card-pad">
+            <p className="eyebrow" style={{ marginBottom: ".75rem" }}>Pipeline</p>
+            <h2 style={{ fontSize: "1rem", fontWeight: 700, color: "var(--ink)", marginBottom: "1.25rem" }}>
+              How it works
+            </h2>
+            <ol className="howto" style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "1.125rem" }}>
+              {HOWTO_STEPS.map(s => (
+                <li key={s.n} style={{ display: "flex", gap: ".875rem", alignItems: "flex-start" }}>
+                  <span
+                    style={{
+                      flexShrink: 0,
+                      width: "2rem",
+                      height: "2rem",
+                      borderRadius: "50%",
+                      background: "var(--mint-soft)",
+                      color: "var(--forest)",
+                      fontWeight: 700,
+                      fontSize: ".75rem",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                    }}
+                  >
+                    {s.n}
+                  </span>
+                  <div>
+                    <p style={{ fontWeight: 700, color: "var(--ink)", marginBottom: ".125rem" }}>{s.title}</p>
+                    <p style={{ fontSize: ".8125rem", color: "var(--slate-2)", lineHeight: 1.5 }}>{s.desc}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
+
+        {/* Recent uploads */}
+        <div className="section-head" style={{ marginBottom: "1rem" }}>
+          <h2>Recent uploads</h2>
+        </div>
+
+        <div className="card">
+          {jobs.length === 0 ? (
+            <div className="card-pad" style={{ textAlign: "center", padding: "3rem 1.5rem", color: "var(--slate-2)", fontSize: ".875rem" }}>
+              No uploads yet — drop a file above to get started
+            </div>
+          ) : (
+            <>
+              <div
+                className="list-head"
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr auto auto auto",
+                  gap: ".75rem",
+                  padding: ".625rem 1.25rem",
+                  borderBottom: "1px solid var(--line-2)",
+                  fontSize: ".75rem",
+                  fontWeight: 600,
+                  color: "var(--slate-2)",
+                  textTransform: "uppercase",
+                  letterSpacing: ".05em",
+                }}
+              >
+                <span>File</span>
+                <span>Step</span>
+                <span>Status</span>
+                <span></span>
+              </div>
+
+              {jobs.map(j => (
+                <div
+                  key={j.job_id}
+                  className="lrow"
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto auto auto",
+                    alignItems: "center",
+                    gap: ".75rem",
+                    padding: ".875rem 1.25rem",
+                    borderBottom: "1px solid var(--line-2)",
+                  }}
+                >
+                  {/* Doc icon + name */}
+                  <div style={{ display: "flex", alignItems: "center", gap: ".75rem", minWidth: 0 }}>
+                    <div
+                      className="doc-icon"
+                      style={{
+                        flexShrink: 0,
+                        width: "2.25rem",
+                        height: "2.25rem",
+                        borderRadius: "8px",
+                        background: "var(--tile)",
+                        border: "1px solid var(--line)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "1.125rem",
+                        position: "relative",
+                      }}
+                    >
+                      {FILE_ICONS[j.file_type] || "📄"}
+                      <span
+                        style={{
+                          position: "absolute",
+                          bottom: "-4px",
+                          right: "-4px",
+                          fontSize: ".5rem",
+                          fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                          fontWeight: 700,
+                          background: "var(--forest)",
+                          color: "#fff",
+                          borderRadius: "3px",
+                          padding: "1px 3px",
+                          lineHeight: 1,
+                          textTransform: "uppercase",
+                        }}
+                      >
+                        {j.file_type}
+                      </span>
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <p
+                        style={{
+                          fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                          fontSize: ".8125rem",
+                          fontWeight: 500,
+                          color: "var(--ink)",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {j.filename}
+                      </p>
+                      {j.error_message && (
+                        <p style={{ fontSize: ".75rem", color: "var(--err-fg)", marginTop: ".125rem" }}>
+                          {j.error_message}
+                        </p>
+                      )}
+                      {j.retry_count !== undefined && j.retry_count > 0 && (
+                        <p style={{ fontSize: ".75rem", color: "var(--warn-fg)", marginTop: ".125rem" }}>
+                          Retried {j.retry_count}&times;
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Step */}
+                  <span style={{ fontSize: ".8125rem", color: "var(--slate-2)", whiteSpace: "nowrap" }}>
+                    {j.step ? j.step.replace(/_/g, " ") : "—"}
+                  </span>
+
+                  {/* Status badge */}
+                  <span className={STATUS_BADGE[j.status] || "badge badge-neutral"}>
+                    {j.status === "FAILED_PERMANENT" ? "FAILED" : j.status}
+                  </span>
+
+                  {/* Actions */}
+                  <div style={{ display: "flex", gap: ".5rem", justifyContent: "flex-end" }}>
+                    {j.status === "COMPLETED" && (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setDrawerJob(j)}
+                      >
+                        View Summary
+                      </button>
                     )}
-                    {j.error_message && <p className="text-xs text-red-600 mt-0.5">{j.error_message}</p>}
+                    {(j.status === "FAILED" || j.status === "FAILED_PERMANENT") && j._file && (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => retryUpload(j)}
+                      >
+                        Retry
+                      </button>
+                    )}
                   </div>
                 </div>
-                <div className="flex items-center gap-2 shrink-0 ml-3 flex-wrap justify-end">
-                  <span className={`text-xs font-semibold px-2 py-1 rounded-full whitespace-nowrap ${STATUS_COLORS[j.status] || "bg-gray-100 text-gray-700"}`}>
-                    {j.status}
-                  </span>
-                  {j.status === "COMPLETED" && (
-                    <button
-                      onClick={() => setDrawerJob(j)}
-                      className="text-xs bg-indigo-50 text-indigo-700 px-2 py-1 rounded-full hover:bg-indigo-100 whitespace-nowrap">
-                      View Summary
-                    </button>
-                  )}
-                  {(j.status === "FAILED" || j.status === "FAILED_PERMANENT") && j._file && (
-                    <button
-                      onClick={() => retryUpload(j)}
-                      className="text-xs bg-amber-50 text-amber-700 px-2 py-1 rounded-full hover:bg-amber-100 whitespace-nowrap">
-                      Retry
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
+              ))}
+            </>
+          )}
         </div>
       </div>
 
       {/* Right-side summary drawer */}
       {drawerJob && (
         <>
-          <div className="fixed inset-0 bg-black/30 z-40" onClick={() => setDrawerJob(null)} />
-          <div className="fixed right-0 top-0 h-full w-full sm:w-96 bg-white shadow-2xl z-50 flex flex-col">
-            <div className="px-5 py-4 border-b flex items-center justify-between">
-              <div>
-                <h2 className="font-semibold text-gray-800">{drawerJob.filename}</h2>
-                <p className="text-xs text-gray-400 mt-0.5 uppercase">{drawerJob.file_type}</p>
+          {/* Overlay */}
+          <div
+            onClick={() => setDrawerJob(null)}
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(4,9,26,.3)",
+              zIndex: 40,
+            }}
+          />
+
+          {/* Drawer */}
+          <div
+            style={{
+              position: "fixed",
+              right: 0,
+              top: 0,
+              height: "100%",
+              width: "24rem",
+              background: "var(--card)",
+              boxShadow: "-4px 0 32px rgba(4,9,26,.12)",
+              zIndex: 50,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {/* Drawer header */}
+            <div
+              style={{
+                padding: "1.25rem 1.5rem",
+                borderBottom: "1px solid var(--line)",
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: "1rem",
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <p
+                  style={{
+                    fontWeight: 700,
+                    color: "var(--ink)",
+                    fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                    fontSize: ".875rem",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {drawerJob.filename}
+                </p>
+                <span
+                  style={{
+                    display: "inline-block",
+                    marginTop: ".25rem",
+                    fontSize: ".6875rem",
+                    fontWeight: 700,
+                    fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                    color: "var(--teal-link)",
+                    background: "var(--mint-soft)",
+                    borderRadius: "4px",
+                    padding: "2px 6px",
+                    textTransform: "uppercase",
+                    letterSpacing: ".04em",
+                  }}
+                >
+                  {drawerJob.file_type}
+                </span>
               </div>
-              <button onClick={() => setDrawerJob(null)} className="text-gray-400 hover:text-gray-700 text-xl font-bold">×</button>
+              <button
+                onClick={() => setDrawerJob(null)}
+                style={{
+                  flexShrink: 0,
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "1.25rem",
+                  color: "var(--slate-2)",
+                  lineHeight: 1,
+                  padding: "2px",
+                }}
+                aria-label="Close drawer"
+              >
+                &times;
+              </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-3">
+
+            {/* Drawer body */}
+            <div
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                padding: "1.25rem 1.5rem",
+                display: "flex",
+                flexDirection: "column",
+                gap: "1rem",
+              }}
+            >
               {drawerJob.chunk_count !== undefined && (
-                <div className="bg-indigo-50 rounded-lg px-3 py-2 text-sm">
-                  <span className="font-medium text-indigo-700">Chunks indexed:</span>
-                  <span className="ml-2 text-indigo-600">{drawerJob.chunk_count}</span>
+                <div
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: ".375rem",
+                    background: "var(--mint-soft)",
+                    color: "var(--ok-fg)",
+                    borderRadius: "6px",
+                    padding: ".375rem .75rem",
+                    fontSize: ".8125rem",
+                    fontWeight: 600,
+                  }}
+                >
+                  <span>Chunks indexed:</span>
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                      fontSize: ".875rem",
+                    }}
+                  >
+                    {drawerJob.chunk_count}
+                  </span>
                 </div>
               )}
+
               {drawerJob.result && Object.keys(drawerJob.result).length > 0 ? (
                 Object.entries(drawerJob.result).map(([k, v]) => (
-                  <div key={k} className="border rounded-lg p-3">
-                    <p className="text-xs font-semibold text-gray-500 uppercase mb-1">{k.replace(/_/g, " ")}</p>
+                  <div
+                    key={k}
+                    style={{
+                      border: "1px solid var(--line)",
+                      borderRadius: "8px",
+                      padding: ".875rem 1rem",
+                    }}
+                  >
+                    <p
+                      style={{
+                        fontSize: ".6875rem",
+                        fontWeight: 700,
+                        color: "var(--slate-2)",
+                        textTransform: "uppercase",
+                        letterSpacing: ".06em",
+                        marginBottom: ".5rem",
+                      }}
+                    >
+                      {k.replace(/_/g, " ")}
+                    </p>
                     {Array.isArray(v) ? (
-                      <ul className="list-disc list-inside text-sm text-gray-700 space-y-0.5">
-                        {(v as unknown[]).map((item, i) => <li key={i}>{String(item)}</li>)}
+                      <ul style={{ margin: 0, paddingLeft: "1.25rem", display: "flex", flexDirection: "column", gap: ".25rem" }}>
+                        {(v as unknown[]).map((item, i) => (
+                          <li key={i} style={{ fontSize: ".875rem", color: "var(--ink)", lineHeight: 1.55 }}>
+                            {String(item)}
+                          </li>
+                        ))}
                       </ul>
                     ) : typeof v === "object" && v !== null ? (
-                      <pre className="text-xs text-gray-600 whitespace-pre-wrap">{JSON.stringify(v, null, 2)}</pre>
+                      <pre
+                        style={{
+                          fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                          fontSize: ".75rem",
+                          color: "var(--slate)",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                          margin: 0,
+                        }}
+                      >
+                        {JSON.stringify(v, null, 2)}
+                      </pre>
                     ) : (
-                      <p className="text-sm text-gray-700">{String(v)}</p>
+                      <p style={{ fontSize: ".875rem", color: "var(--ink)", lineHeight: 1.55 }}>
+                        {String(v)}
+                      </p>
                     )}
                   </div>
                 ))
               ) : (
-                <p className="text-sm text-gray-400 text-center mt-8">No summary data available</p>
+                <p
+                  style={{
+                    fontSize: ".875rem",
+                    color: "var(--slate-2)",
+                    textAlign: "center",
+                    marginTop: "3rem",
+                  }}
+                >
+                  No summary data available
+                </p>
               )}
             </div>
           </div>

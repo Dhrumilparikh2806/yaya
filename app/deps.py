@@ -1,3 +1,13 @@
+"""
+FastAPI dependency injectors.
+
+get_db       — yields a SQLModel Session for the request lifetime.
+get_current_user — decodes the Bearer JWT, loads the User row, updates
+                   last_active_at, and raises 401 if the token is invalid
+                   or the account is inactive.
+require_admin    — wraps get_current_user and raises 403 unless role == admin.
+"""
+
 from datetime import datetime
 from typing import Generator
 

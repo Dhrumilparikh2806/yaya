@@ -1,3 +1,19 @@
+"""
+RAG query endpoints.
+
+POST /v1/query
+    Standard JSON response.  Runs the full hybrid search pipeline via
+    engine.query() and returns answer + numbered citations + RAGAS scores
+    (null until the background Celery task completes).  Uses Groq as the
+    LLM — no Gemini API key required.
+
+POST /v1/query/stream
+    Server-Sent Events streaming response.  Uses the Gemini SDK to stream
+    answer tokens as they are generated.  Requires GEMINI_API_KEY to be set.
+    Both endpoints share _resolve_chunks_and_context() for retrieval so the
+    confidence gate and hybrid search behaviour are identical.
+"""
+
 import json
 import uuid
 from typing import Optional
@@ -43,7 +59,6 @@ def query_documents(
                 raise HTTPException(status_code=400, detail=f"Job {jid} is not COMPLETED")
         job_ids_str = [str(j) for j in req.job_ids]
     else:
-        # No filter — search all completed documents (shared knowledge base)
         job_ids_str = None
 
     return engine.query(

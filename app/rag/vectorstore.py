@@ -1,3 +1,23 @@
+"""
+ChromaDB HTTP client helpers.
+
+All chunks from all file types share a single collection (CHROMA_COLLECTION,
+default: geminirag_chunks) configured with hnsw:space=cosine.
+
+add_chunks()   — upserts child chunks with their embeddings and metadata dict.
+                 The metadata includes job_id, filename, file_type, chunk_index,
+                 page_or_segment label, parent_id, parent_text (for hierarchical
+                 retrieval), and — for audio/video — speaker_label and
+                 speaker_embedding_json.
+search()       — cosine similarity search; returns parent_text (if present) as
+                 the chunk text so the LLM receives richer context.
+rrf_merge()    — Reciprocal Rank Fusion: each result list contributes
+                 1/(k + rank) to a shared score; top-k by combined score are
+                 returned.  RRF scores are much smaller than cosine similarities
+                 and must NOT be compared against CONFIDENCE_THRESHOLD directly.
+delete_job_chunks() — removes all chunks for a job before re-indexing.
+"""
+
 import chromadb
 
 from app.observability.logging import get_logger
@@ -91,7 +111,17 @@ def rrf_merge(
     top_k: int,
     k: int = 60,
 ) -> list[dict]:
-    """Reciprocal Rank Fusion — merges vector and BM25 result lists."""
+    """Reciprocal Rank Fusion — merges vector and BM25 result lists.
+
+    Each result list contributes 1 / (k + rank) to a shared per-chunk score.
+    k=60 is the standard value from the original RRF paper; it dampens the
+    effect of very high ranks without over-weighting top-1 results.
+
+    IMPORTANT: RRF scores are in the range (0, 1/60] — far smaller than cosine
+    similarity scores (0–1).  Do NOT compare rrf_merged scores against
+    CONFIDENCE_THRESHOLD; always use the original vector score captured before
+    this call.
+    """
     scores: dict[str, dict] = {}
 
     for rank, r in enumerate(vector_results):
@@ -109,7 +139,8 @@ def rrf_merge(
     sorted_items = sorted(scores.values(), key=lambda x: x["rrf"], reverse=True)
     results = [s["data"] for s in sorted_items[:top_k]]
 
-    # Attach merged rrf score so confidence gate works
+    # Overwrite per-chunk score with the merged RRF score for downstream sorting.
+    # Callers that need the original cosine score must capture it before this call.
     for item, s in zip(results, sorted_items[:top_k]):
         item["score"] = s["rrf"]
 

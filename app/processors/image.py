@@ -1,3 +1,16 @@
+"""
+Image file processor (PNG, JPG, JPEG, WEBP).
+
+Sends the image to Groq Vision (llama-4-scout) with _EXTRACTION_PROMPT, which
+asks the model to OCR all visible text, describe charts and diagrams, and
+extract structured data from forms and business cards.
+
+The extracted markdown is wrapped in a '# filename' heading and stored as
+_chunk_text for the hierarchical chunker.  This same _EXTRACTION_PROMPT and
+the same _call_vision_markdown() method are reused by VideoProcessor when
+processing individual video frames so the two pipelines stay consistent.
+"""
+
 from pathlib import Path
 
 from app.processors.base import BaseProcessor

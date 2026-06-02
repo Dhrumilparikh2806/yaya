@@ -1,3 +1,17 @@
+"""
+Job management endpoints.
+
+GET  /v1/jobs           — list all jobs (shared knowledge-base design: all
+                          authenticated users see all jobs).
+GET  /v1/jobs/{id}      — single job status including step, retry count, and
+                          error details.
+POST /v1/jobs/{id}/reprocess — re-queues a job (resets retry_count and error
+                               fields, transitions back to PENDING).
+
+Note: The shared-visibility design is intentional for a team knowledge-base
+where all uploaded documents are collectively searchable.
+"""
+
 import uuid
 from datetime import datetime
 from typing import Optional

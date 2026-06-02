@@ -15,31 +15,29 @@ export default function NavBar() {
 
   const handleLogout = () => { logout(); nav("/login"); };
 
-  const linkClass = (to: string) =>
-    `text-sm font-medium transition-colors ${
-      pathname === to
-        ? "text-white border-b-2 border-white pb-0.5"
-        : "text-indigo-200 hover:text-white"
-    }`;
-
   return (
-    <nav className="bg-indigo-700 text-white px-6 py-3 flex items-center gap-6">
-      <span className="font-bold text-lg tracking-tight shrink-0">GeminiRAG</span>
-      {NAV_LINKS.map(({ to, label }) => (
-        <Link key={to} className={linkClass(to)} to={to}>{label}</Link>
-      ))}
-      {user?.role === "admin" && (
-        <Link className={linkClass("/admin")} to="/admin">Admin</Link>
-      )}
-      <div className="ml-auto flex items-center gap-4">
-        <span className="text-sm text-indigo-200 hidden sm:block">{user?.email}</span>
-        <button
-          onClick={handleLogout}
-          className="bg-white text-indigo-700 px-3 py-1 rounded text-sm font-medium hover:bg-indigo-50"
-        >
-          Logout
-        </button>
+    <header className="appnav">
+      <div className="appnav-inner">
+        <Link className="logo" to="/upload">
+          <span className="mark"></span> GeminiRAG
+        </Link>
+        <nav className="appnav-links">
+          {NAV_LINKS.map(({ to, label }) => (
+            <Link key={to} to={to} className={pathname === to ? "active" : undefined}>
+              {label}
+            </Link>
+          ))}
+          {user?.role === "admin" && (
+            <Link to="/admin" className={pathname === "/admin" ? "active" : undefined}>
+              Admin
+            </Link>
+          )}
+        </nav>
+        <div className="appnav-right">
+          <span className="user-email">{user?.email}</span>
+          <button className="btn-logout" onClick={handleLogout}>Logout</button>
+        </div>
       </div>
-    </nav>
+    </header>
   );
 }

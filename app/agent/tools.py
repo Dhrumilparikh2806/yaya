@@ -1,3 +1,26 @@
+"""
+Tool implementations used by the Groq agent in agent.py.
+
+All tools are plain Python functions called directly by the agent (not via ADK
+MCP decorators in the final implementation).  Each returns a JSON-serialisable
+dict or str.
+
+Tools
+-----
+set_agent_user_id(user_id)       — stores the current user's UUID in a
+                                   ContextVar so tools can scope DB queries
+                                   without passing user_id through every call.
+ingest_file(file_path)           — copies a file into UPLOAD_DIR, creates a
+                                   Job row, and enqueues process_file.
+get_job_status(job_id)           — polls Job.status / step / error from the DB.
+query_rag(question, job_ids)     — runs the full RAG engine and returns the
+                                   answer with citations.
+list_documents()                 — returns completed jobs with chunk counts and
+                                   the total embedded vector count from ChromaDB.
+summarize_document(job_id)       — returns the structured summary JSON stored
+                                   in Job.result by the processor.
+"""
+
 import json
 import shutil
 import time
@@ -158,37 +181,41 @@ def query_rag(question: str, job_ids: list[str] | None = None) -> dict:
     return result
 
 
-def list_documents(limit: int = 20) -> dict:
+def list_documents() -> dict:
     """
-    List successfully processed documents available for querying.
-    Returns a summary with total count plus up to `limit` recent documents.
+    Return pipeline statistics: accurate totals plus a sample of recent documents.
+    total_documents and total_chunks_embedded always reflect ALL indexed content.
     """
     start = time.monotonic()
+    SAMPLE = 15  # documents to include in the sample list
     try:
         with Session(get_engine()) as db:
-            stmt = select(Job).where(Job.status == JobStatus.completed)
+            stmt = select(Job).where(
+                Job.status == JobStatus.completed,
+                Job.chunk_count > 0,
+            )
             jobs = db.exec(stmt).all()
-            total = len(jobs)
-            shown = jobs[:limit]
+            total_docs = len(jobs)
+            total_chunks = sum(j.chunk_count or 0 for j in jobs)
             result = {
-                "total_documents": total,
-                "showing": len(shown),
-                "documents": [
+                "total_documents": total_docs,
+                "total_chunks_embedded": total_chunks,
+                "sample_documents": [
                     {
-                        "job_id": str(j.id),
                         "filename": j.filename,
                         "file_type": j.file_type,
                         "chunk_count": j.chunk_count,
                     }
-                    for j in shown
+                    for j in jobs[:SAMPLE]
                 ],
             }
     except Exception as exc:
         log.error("tool_call_error", tool_name="list_documents", error=str(exc))
-        result = {"total_documents": 0, "showing": 0, "documents": []}
+        result = {"total_documents": 0, "total_chunks_embedded": 0, "sample_documents": []}
 
     latency_ms = int((time.monotonic() - start) * 1000)
-    log.info("tool_call", tool_name="list_documents", latency_ms=latency_ms, result_preview=str(result)[:200])
+    log.info("tool_call", tool_name="list_documents", latency_ms=latency_ms,
+             total_docs=result["total_documents"], total_chunks=result["total_chunks_embedded"])
     return result
 
 

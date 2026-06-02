@@ -2,6 +2,12 @@ import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import axios from "axios";
 
+const BULLETS = [
+  "Ingest PDFs, DOCX, and plain text instantly",
+  "Semantic search across your entire knowledge base",
+  "Source-attributed answers — always traceable",
+];
+
 export default function RegisterPage() {
   const nav = useNavigate();
   const [email, setEmail] = useState("");
@@ -10,6 +16,9 @@ export default function RegisterPage() {
   const [role, setRole] = useState<"user" | "admin">("user");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const passwordMismatch =
+    confirmPassword.length > 0 && confirmPassword !== password;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,7 +30,8 @@ export default function RegisterPage() {
       setError("Password must be at least 8 characters");
       return;
     }
-    setError(""); setLoading(true);
+    setError("");
+    setLoading(true);
     try {
       const base = import.meta.env.VITE_API_URL || "http://localhost:8000";
       await axios.post(`${base}/auth/register`, { email, password, role });
@@ -29,55 +39,156 @@ export default function RegisterPage() {
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } };
       setError(e.response?.data?.detail || "Registration failed");
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-      <div className="bg-white rounded-2xl shadow p-8 w-full max-w-md">
-        <h1 className="text-2xl font-bold mb-6 text-gray-800">Create account</h1>
-        {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded px-4 py-2 mb-4 text-sm">{error}</div>}
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-            <input className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              type="email" value={email} onChange={e => setEmail(e.target.value)} required />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
-            <input className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={8} />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Confirm password</label>
-            <input
-              className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 ${
-                confirmPassword && confirmPassword !== password
-                  ? "border-red-400 focus:ring-red-400"
-                  : "focus:ring-indigo-500"
-              }`}
-              type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} required />
-            {confirmPassword && confirmPassword !== password && (
-              <p className="text-xs text-red-600 mt-1">Passwords do not match</p>
+    <div className="auth-wrap">
+      <aside className="auth-aside">
+        <div className="glow" />
+
+        {/* Logo — top */}
+        <div className="a-logo">
+          <span className="mark" />
+          GeminiRAG
+        </div>
+
+        {/* Main content — middle */}
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <h2>
+            Start building<br />your knowledge base.
+          </h2>
+          <p style={{ color: "rgba(255,255,255,.65)", marginTop: 18, fontSize: 15.5, lineHeight: 1.55 }}>
+            Connect your documents and get grounded, cited answers in seconds.
+          </p>
+
+          <ul style={{ listStyle: "none", marginTop: 28, display: "flex", flexDirection: "column", gap: 14, padding: 0 }}>
+            {BULLETS.map((text) => (
+              <li key={text} style={{ display: "flex", gap: 11, alignItems: "center", color: "#fff", fontSize: 14.5 }}>
+                <span style={{ width: 22, height: 22, borderRadius: 99, background: "rgba(41,232,132,.18)", display: "grid", placeItems: "center", flexShrink: 0 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: 99, background: "var(--mint)" }} />
+                </span>
+                {text}
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {/* Version — bottom */}
+        <div className="aside-ver">v2.4 · secure workspace</div>
+
+        <div className="auth-hex" />
+      </aside>
+
+      <main className="auth-main">
+        <div className="auth-card">
+          <h1>Create account</h1>
+          <p className="sub">
+            Get started for free. No credit card required.
+          </p>
+
+          <form onSubmit={handleSubmit}>
+            <div className="field">
+              <label htmlFor="reg-email">Email</label>
+              <input
+                id="reg-email"
+                className="input"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="field">
+              <label htmlFor="reg-password">Password</label>
+              <input
+                id="reg-password"
+                className="input"
+                type="password"
+                autoComplete="new-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+            </div>
+
+            <div className="field">
+              <label htmlFor="reg-confirm">Confirm password</label>
+              <input
+                id="reg-confirm"
+                className="input"
+                type="password"
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                required
+                style={
+                  passwordMismatch
+                    ? { borderColor: "var(--err-fg)" }
+                    : undefined
+                }
+              />
+              {passwordMismatch && (
+                <span
+                  style={{
+                    fontSize: 12.5,
+                    color: "var(--err-fg)",
+                    marginTop: 4,
+                    display: "block",
+                  }}
+                >
+                  Passwords do not match
+                </span>
+              )}
+            </div>
+
+            <div className="field">
+              <label htmlFor="reg-role">Role</label>
+              <select
+                id="reg-role"
+                className="input"
+                value={role}
+                onChange={(e) => setRole(e.target.value as "user" | "admin")}
+              >
+                <option value="user">User</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+
+            {error && (
+              <div
+                style={{
+                  background: "var(--err-bg)",
+                  color: "var(--err-fg)",
+                  borderRadius: 8,
+                  padding: "10px 14px",
+                  fontSize: 13.5,
+                  marginBottom: 4,
+                }}
+              >
+                {error}
+              </div>
             )}
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
-            <select className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              value={role} onChange={e => setRole(e.target.value as "user" | "admin")}>
-              <option value="user">User</option>
-              <option value="admin">Admin</option>
-            </select>
-          </div>
-          <button disabled={loading || (confirmPassword !== "" && confirmPassword !== password)}
-            className="w-full bg-indigo-600 text-white rounded-lg py-2 font-medium hover:bg-indigo-700 disabled:opacity-50">
-            {loading ? "Creating..." : "Create account"}
-          </button>
-        </form>
-        <p className="mt-4 text-sm text-center text-gray-500">
-          Have an account? <Link to="/login" className="text-indigo-600 hover:underline">Sign in</Link>
-        </p>
-      </div>
+
+            <button
+              className="btn btn-mint btn-block"
+              type="submit"
+              disabled={loading || passwordMismatch}
+            >
+              {loading ? "Creating account…" : "Create account"}
+            </button>
+          </form>
+
+          <p className="auth-foot">
+            Have an account? <Link to="/login">Sign in</Link>
+          </p>
+        </div>
+      </main>
     </div>
   );
 }

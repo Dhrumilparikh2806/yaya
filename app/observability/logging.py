@@ -1,3 +1,14 @@
+"""
+Structured logging and LLM call tracking.
+
+configure_logging() — call once at startup to set up structlog with ISO timestamps
+                      and JSON output.
+get_logger()        — returns a structlog BoundLogger; bind job_id / user_id as needed.
+log_llm_call()      — writes a UsageLog row to PostgreSQL AND emits a structlog
+                      'llm_call' event, so every Groq/Gemini/Whisper/embed API
+                      call is observable both in the DB and in the JSON log stream.
+"""
+
 import uuid
 from datetime import datetime
 from typing import Optional

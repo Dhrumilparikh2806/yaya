@@ -1,3 +1,17 @@
+"""
+Admin-only endpoints (require role == admin).
+
+GET /v1/admin/usage          — token/latency aggregates over the last N days,
+                               broken down by day, endpoint, and user.
+GET /v1/admin/ragas          — RAGAS metric averages and per-day trend data for
+                               the last N days; surfaces low-scoring queries
+                               (faithfulness < 0.8 or answer_relevancy < 0.7).
+GET /v1/admin/users          — all users with total query / token / job counts.
+PATCH /v1/admin/users/{id}   — toggle is_active (deactivate / reactivate).
+GET /v1/admin/logs           — raw UsageLog entries (filterable by job_id,
+                               user_id; paginated via limit/offset).
+"""
+
 import json
 import uuid
 from datetime import datetime, timedelta

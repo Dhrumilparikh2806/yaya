@@ -1,3 +1,4 @@
+"""Dev utility — repeatedly poll job status until all jobs reach a terminal state."""
 import time
 import sys
 

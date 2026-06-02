@@ -1,3 +1,28 @@
+"""
+Celery task definitions.
+
+process_file
+    Main file-processing pipeline.  Dispatches to the correct processor class
+    (PDF / DOCX / XLSX / Image / Audio / Video), runs extract → summarise →
+    chunk → embed → index, and updates the Job row at every step.
+    For audio and video files, per-speaker SpeechBrain ECAPA embeddings are
+    attached to each chunk's ChromaDB metadata before indexing.
+    Retries up to CELERY_MAX_RETRIES times with exponential back-off on
+    rate-limit and unknown errors; jumps straight to FAILED_PERMANENT on
+    invalid-input (400) errors.  Permanently failed jobs are pushed to a
+    Redis dead-letter queue for manual review.
+
+compute_ragas
+    Async RAGAS quality evaluation triggered after every successful RAG query.
+    Re-embeds the original question, re-retrieves context chunks, and calls
+    compute_ragas_scores().  Stores the five metric scores in QueryHistory.
+
+cleanup_old_uploads
+    Beat-scheduled daily task that deletes on-disk upload directories for
+    jobs that have been in a terminal state (COMPLETED / FAILED_PERMANENT)
+    for more than 7 days.
+"""
+
 import json
 import time
 import uuid
@@ -104,9 +129,12 @@ def process_file(self, job_id: str):
                 elif file_type == "image":
                     from app.processors.image import ImageProcessor
                     processor = ImageProcessor(job=job, settings=settings)
-                elif file_type in ("video", "audio"):
-                    from app.processors.video import VideoAudioProcessor
-                    processor = VideoAudioProcessor(job=job, settings=settings)
+                elif file_type == "audio":
+                    from app.processors.audio import AudioProcessor
+                    processor = AudioProcessor(job=job, settings=settings)
+                elif file_type == "video":
+                    from app.processors.video import VideoProcessor
+                    processor = VideoProcessor(job=job, settings=settings)
                 else:
                     raise ValueError(f"Unsupported file_type: {file_type}")
 
@@ -129,6 +157,34 @@ def process_file(self, job_id: str):
 
                 if not chunks:
                     log.warning("no_chunks_produced", job_id=job_id, file_type=file_type)
+
+                # ── Attach SpeechBrain ECAPA embeddings to audio/video chunks ──
+                # speaker_embeddings is a dict {speaker_label: [float, ...]} produced
+                # by diarize_audio(return_embeddings=True).  base.py pops it from the
+                # summary before DB serialisation to avoid storing 192-float lists in
+                # Job.result, then restores it so this task can consume it.
+                # Each child chunk's markdown header looks like [Speaker 1 at 00:05],
+                # so we extract the speaker label with a regex and store the mean ECAPA
+                # embedding for that speaker as JSON in ChromaDB metadata.
+                if file_type in ("audio", "video") and chunks:
+                    import re as _re
+                    import json as _json
+                    speaker_embeddings = summary.get("_speaker_embeddings") or {}
+                    if speaker_embeddings:
+                        _speaker_re = _re.compile(r'\[Speaker (\d+) at')
+                        for chunk in chunks:
+                            m = _speaker_re.search(chunk["text"])
+                            if m:
+                                speaker_label = f"Speaker {m.group(1)}"
+                                emb = speaker_embeddings.get(speaker_label)
+                                if emb:
+                                    chunk["metadata"]["speaker_label"] = speaker_label
+                                    chunk["metadata"]["speaker_embedding_json"] = _json.dumps(emb)
+                        log.info(
+                            "speaker_embeddings_tagged",
+                            job_id=job_id,
+                            speaker_count=len(speaker_embeddings),
+                        )
 
                 # ── Embedding ─────────────────────────────────────────────
                 update_job_state(db, job_id, JobStatus.processing, step="embedding")

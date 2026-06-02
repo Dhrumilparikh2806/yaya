@@ -1,3 +1,34 @@
+"""
+Core RAG query engine.
+
+Public API
+----------
+query(question, job_ids, user_id, db, settings) -> dict
+    Full RAG pipeline: embed → hybrid search → confidence gate → Groq LLM →
+    save QueryHistory → enqueue async RAGAS evaluation.
+    Returns answer text, numbered citations, token counts, and latency.
+
+_resolve_chunks_and_context(question, job_ids, settings) -> dict
+    Shared retrieval step used by both query() and the /v1/query/stream
+    endpoint.  Returns either an early-return payload (no chunks / low
+    confidence) or the ranked chunk list and assembled user prompt.
+
+Hybrid Search Pipeline
+----------------------
+1. Embed question with fastembed (BAAI/bge-small-en-v1.5).
+2. Vector search in ChromaDB (cosine similarity, child chunks).
+3. BM25 sparse search on the same corpus (cached in Redis).
+4. Merge with Reciprocal Rank Fusion (k=60).
+5. Cross-encoder rerank (sentence-transformers).
+6. Confidence gate — if top vector score < CONFIDENCE_THRESHOLD, return
+   early without calling the LLM (prevents hallucination).
+7. Build numbered context block (parent chunk text, capped at 1200 chars).
+8. Call Groq (GROQ_MODEL) with RAG_SYSTEM_PROMPT.
+
+Broad-query detection (_BROAD_QUERY_RE) doubles effective_top_k for
+questions that span many documents (e.g. "compare all clients").
+"""
+
 import json
 import time
 from datetime import datetime
@@ -9,6 +40,7 @@ from app.observability.logging import get_logger, log_llm_call
 from app.rag.embedder import embed_query
 from app.rag.vectorstore import get_chroma_client, get_or_create_collection, search, rrf_merge
 from app.rag.bm25_index import load_bm25, build_bm25, search_bm25
+from app.rag.reranker import rerank
 
 log = get_logger()
 
@@ -17,23 +49,42 @@ RAG_SYSTEM_PROMPT = """You are a document Q&A assistant. Answer ONLY from the nu
 RULES (each violation counts against faithfulness):
 1. Every sentence in your answer MUST be directly supported by a specific excerpt. If a fact is not explicitly written in an excerpt, do not state it.
 2. After every factual claim, immediately place the citation marker [n] matching the excerpt number.
-3. If the answer is not in the excerpts, respond only with: "The provided documents do not contain this information."
+3. If the excerpts contain PARTIAL information relevant to the question, share what IS available with citations, then note what is missing. Only say "The provided documents do not contain this information." when the excerpts contain absolutely nothing relevant.
 4. Never infer, extrapolate, or combine information creatively. Stick to verbatim or near-verbatim facts from the excerpts.
 5. Be concise. No preamble, no filler phrases.
 """
 
 
+import re as _re
+_BROAD_QUERY_RE = _re.compile(
+    r"\b(all|every|across|compare|list\s+all|summari[sz]e\s+all|each\s+client|"
+    r"all\s+\d+|all\s+accounts?|all\s+clients?|entire|overall|full\s+list)\b",
+    _re.IGNORECASE,
+)
+
+
 def _resolve_chunks_and_context(question: str, job_ids: list[str] | None, settings) -> dict:
     """Embed question, search ChromaDB, run confidence gate, build prompt. Returns dict."""
+    # Broad cross-document queries ("compare all clients", "list all managers")
+    # need more chunks than single-entity lookups.
+    is_broad = bool(_BROAD_QUERY_RE.search(question))
+    effective_top_k = min(settings.RAG_TOP_K * 2, 20) if is_broad else settings.RAG_TOP_K
+
     q_embedding = embed_query(question, settings)
     client = get_chroma_client(settings)
     collection = get_or_create_collection(client, settings)
 
-    # Hybrid search: vector + BM25 merged via Reciprocal Rank Fusion
-    vector_chunks = search(collection, q_embedding, top_k=settings.RAG_TOP_K * 2, job_ids=job_ids)
+    # Hybrid search: vector + BM25 merged via Reciprocal Rank Fusion, then cross-encoder re-rank
+    vector_chunks = search(collection, q_embedding, top_k=effective_top_k * 2, job_ids=job_ids)
+
+    # Capture vector scores before rrf_merge mutates them in-place
+    top_vector_score = vector_chunks[0]["score"] if vector_chunks else 0.0
+    avg_vector_score = sum(c["score"] for c in vector_chunks) / len(vector_chunks) if vector_chunks else 0.0
+
     index_data = load_bm25(settings) or build_bm25(collection, settings)
-    bm25_chunks = search_bm25(index_data, question, top_k=settings.RAG_TOP_K * 2, job_ids=job_ids)
-    chunks = rrf_merge(vector_chunks, bm25_chunks, top_k=settings.RAG_TOP_K)
+    bm25_chunks = search_bm25(index_data, question, top_k=effective_top_k * 2, job_ids=job_ids)
+    rrf_chunks = rrf_merge(vector_chunks, bm25_chunks, top_k=effective_top_k * 2)
+    chunks = rerank(question, rrf_chunks, top_k=effective_top_k)
 
     if not chunks:
         if job_ids:
@@ -48,9 +99,6 @@ def _resolve_chunks_and_context(question: str, job_ids: list[str] | None, settin
         }}
 
     # Confidence gate uses top vector cosine similarity (0–1 scale), not raw RRF score.
-    # RRF scores are ~0.016–0.033 regardless of relevance; vector similarity is calibrated.
-    top_vector_score = vector_chunks[0]["score"] if vector_chunks else 0.0
-    avg_vector_score = sum(c["score"] for c in vector_chunks) / len(vector_chunks) if vector_chunks else 0.0
     if top_vector_score < settings.CONFIDENCE_THRESHOLD:
         return {"early_return": True, "payload": {
             "answer": "I couldn't find sufficiently relevant information in your documents to answer this question confidently.",
@@ -99,6 +147,7 @@ def query(
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=512,
+            temperature=0,
         )
     except groq_sdk.RateLimitError as exc:
         log.warning("rag_rate_limit", model=settings.GROQ_MODEL, error=str(exc)[:200])

@@ -1,3 +1,16 @@
+"""
+XLSX and CSV file processor.
+
+Iterates every sheet in the workbook with openpyxl.  Each sheet becomes a
+'## Sheet Name' markdown section containing a markdown table with column
+headers.  Rows beyond _MAX_ROWS (500) are truncated to keep token budgets
+manageable.  CSV files are parsed with the built-in csv module and treated as
+a single-sheet workbook.
+
+The LLM summary (title, summary, sheets, column_descriptions, key_insights,
+row_count) is produced by a single Groq call after extraction.
+"""
+
 import csv
 
 import openpyxl

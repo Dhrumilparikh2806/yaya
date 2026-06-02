@@ -1,0 +1,57 @@
+{
+  "description": "Maps serial codes to the client data mixed into each file. Use this to verify RAG pipeline answers.",
+  "files": {},
+  "clients": [
+    "Acme Corporation",
+    "Nova Health Systems",
+    "Titan Logistics Group",
+    "Greenfield Energy Partners",
+    "Sterling Capital Bank",
+    "BlueSky Retail Group",
+    "Pinnacle Education Group",
+    "Nexus Pharmaceuticals",
+    "Atlas Construction & Engineering",
+    "Meridian Technology Solutions"
+  ],
+  "total_files": 140,
+  "breakdown": {
+    "pdf": 60,
+    "docx": 30,
+    "xlsx": 30,
+    "jpg": 20
+  },
+  "test_questions": [
+    "What is the deal value for Sterling Capital Bank?",
+    "What are the main pain points for Nova Health Systems?",
+    "Who is the primary contact at Acme Corporation and what is their email?",
+    "Which competitors are mentioned for Titan Logistics Group?",
+    "What products has BlueSky Retail Group subscribed to?",
+    "What is the deal stage for Greenfield Energy Partners?",
+    "Who is the account manager for Meridian Technology Solutions?",
+    "What are the action items from the most recent meeting involving Atlas Construction?",
+    "What is Nexus Pharmaceuticals' primary pain point?",
+    "Which accounts are in the Closed Won stage?",
+    "What did the speaker say about implementation NPS in the sales meeting?",
+    "List all account managers and their assigned accounts",
+    "What is the contract value for Sterling Capital Bank and what modules are included?",
+    "What escalation issues are mentioned across all accounts?",
+    "Compare the deal stages of all 10 clients"
+  ],
+  "ground_truths": [
+    "The deal value for Sterling Capital Bank is $2,300,000. Sterling Capital Bank is currently in the Legal Review stage.",
+    "The main pain points for Nova Health Systems are HIPAA compliance gaps, fragmented patient data, and slow onboarding.",
+    "The primary contact at Acme Corporation is Rachel Torres, VP of Operations. Her email is r.torres@acmecorp.com.",
+    "The competitors mentioned for Titan Logistics Group are Oracle TMS and SAP.",
+    "BlueSky Retail Group has subscribed to CRM Pro and Customer Journey Analytics.",
+    "The deal stage for Greenfield Energy Partners is Proposal Sent, with a proposed contract value of $415,000.",
+    "The account manager for Meridian Technology Solutions is James Whitfield.",
+    "The action item from the most recent Atlas Construction & Engineering meeting is for Chen Li to send an updated proposal to Robert Okafor (COO) by May 23, 2026.",
+    "Nexus Pharmaceuticals' primary pain point is sales rep efficiency and field sales visibility.",
+    "The accounts in the Closed Won stage are Titan Logistics Group ($1,100,000) and Atlas Construction & Engineering ($780,000).",
+    "The speaker said they would add an implementation NPS slide to the deck and send a recap email with the legal response timeline. They also said they would reference the implementation NPS score in the next call.",
+    "Account managers and their assigned accounts: Chen Li manages BlueSky Retail Group, Titan Logistics Group, and Atlas Construction & Engineering. Sofia Marchetti manages Sterling Capital Bank, Nova Health Systems, and Nexus Pharmaceuticals. James Whitfield manages Acme Corporation, Meridian Technology Solutions, Pinnacle Education Group, and Greenfield Energy Partners.",
+    "The contract value for Sterling Capital Bank is $2,300,000. The proposed modules are CRM Enterprise, Compliance Module, and AI Analytics.",
+    "Escalation issues mentioned include: BlueSky Retail Group at risk of losing deal within 3 business days; Meridian Technology Solutions procurement cycle may extend past Q2 deadline requiring executive escalation; Nexus Pharmaceuticals facing Veeva CRM competitive escalation within 5 business days; Nova Health Systems HIPAA compliance and budget constraints; various support tickets marked as Escalated across multiple accounts.",
+    "Deal stages of all 10 clients: Acme Corporation - Negotiation ($840,000); Nova Health Systems - Pilot ($290,000); Titan Logistics Group - Closed Won ($1,100,000); Greenfield Energy Partners - Proposal Sent ($415,000); Sterling Capital Bank - Legal Review ($2,300,000); BlueSky Retail Group - Discovery ($560,000); Pinnacle Education Group - Negotiation ($175,000); Nexus Pharmaceuticals - Pilot ($630,000); Atlas Construction & Engineering - Closed Won ($780,000); Meridian Technology Solutions - Technical Evaluation ($320,000)."
+  ]
+}

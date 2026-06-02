@@ -1,3 +1,16 @@
+"""
+Text embedding via fastembed (BAAI/bge-small-en-v1.5, runs fully locally).
+
+The model is lazy-loaded into a module-level singleton on first call so the
+ONNX Runtime graph is compiled once and reused for all subsequent requests.
+No external API calls are made — embeddings are free and work offline.
+
+embed_chunks() — batch-embeds a list of chunk dicts; logs token count and
+                 latency to UsageLog so embedding cost is tracked alongside
+                 Groq/Gemini calls.
+embed_query()  — single-vector embed for RAG query and RAGAS re-retrieval.
+"""
+
 import time
 
 from app.observability.logging import get_logger, log_llm_call

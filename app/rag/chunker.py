@@ -1,3 +1,21 @@
+"""
+Markdown text chunker with hierarchical (parent + child) and flat strategies.
+
+Hierarchical chunking — used for all file types in the main pipeline:
+  - Splits markdown at ## headings into sections.
+  - Each section is split into parent chunks (CHUNK_SIZE words, CHUNK_OVERLAP
+    word overlap) for LLM context richness.
+  - Each parent is further split into child chunks (CHILD_CHUNK_SIZE words)
+    which are the units that get embedded and indexed in ChromaDB.
+  - At retrieval time, ChromaDB matches on child text (precise) but the stored
+    parent_text metadata is returned to the LLM (richer context).
+
+Flat chunking (chunk_markdown) — legacy path, kept for backwards compatibility.
+
+Both strategies preserve [Page N] markers inserted by PDF/DOCX processors
+so citations can reference the original page number.
+"""
+
 import re
 
 from app.observability.logging import get_logger

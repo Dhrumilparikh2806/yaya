@@ -1,3 +1,14 @@
+"""
+OpenTelemetry tracing setup.
+
+Uses a ConsoleSpanExporter (stdout) suitable for development and log-aggregation
+pipelines (e.g. Datadog, GCP Cloud Logging).  Swap BatchSpanProcessor target for
+an OTLP exporter to send traces to a collector in production.
+
+The module-level `tracer` is used by Celery tasks to create spans for
+long-running operations such as process_file.
+"""
+
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, BatchSpanProcessor

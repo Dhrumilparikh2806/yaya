@@ -21,29 +21,58 @@ engine = create_engine(DATABASE_URL, echo=False)
 
 
 def _rag_query_with_retry(question, job_ids, user_id, db, settings, max_wait=600):
-    """Call rag_engine.query() with retry on 429, returns (answer, full_contexts)."""
-    from app.rag.engine import _resolve_chunks_and_context
+    """Retrieve chunks and generate answer. Bypasses engine.py to avoid importing
+    the CrossEncoder reranker (sentence-transformers/PyTorch), which crashes when
+    loaded in the same process as ragas + fastembed (ONNX Runtime)."""
+    # Import retrieval components directly — do NOT import app.rag.engine or app.rag.reranker
+    from app.rag.embedder import embed_query
+    from app.rag.vectorstore import get_chroma_client, get_or_create_collection, search, rrf_merge
+    from app.rag.bm25_index import load_bm25, build_bm25, search_bm25
     import groq as groq_sdk
 
-    # Retrieve full chunks for RAGAS (not truncated 200-char excerpts)
-    resolved = _resolve_chunks_and_context(question, job_ids, settings)
-    if resolved["early_return"]:
-        return resolved["payload"]["answer"], []
+    q_embedding = embed_query(question, settings)
+    client = get_chroma_client(settings)
+    collection = get_or_create_collection(client, settings)
 
-    chunks = resolved["chunks"]
-    user_prompt = resolved["user_prompt"]
+    vector_chunks = search(collection, q_embedding, top_k=settings.RAG_TOP_K * 2, job_ids=job_ids)
+    top_vector_score = vector_chunks[0]["score"] if vector_chunks else 0.0
+
+    if top_vector_score < settings.CONFIDENCE_THRESHOLD:
+        return "I couldn't find sufficiently relevant information in your documents to answer this question confidently.", []
+
+    index_data = load_bm25(settings) or build_bm25(collection, settings)
+    bm25_chunks = search_bm25(index_data, question, top_k=settings.RAG_TOP_K * 2, job_ids=job_ids)
+    rrf_chunks = rrf_merge(vector_chunks, bm25_chunks, top_k=settings.RAG_TOP_K * 2)
+    # Use top RAG_TOP_K chunks without cross-encoder (avoids PyTorch/ONNX conflict in eval process)
+    chunks = rrf_chunks[:settings.RAG_TOP_K]
+
+    if not chunks:
+        return "No documents found to search. Please upload and process files first.", []
+
     full_contexts = [c["text"] for c in chunks]
+
+    _MAX_CHUNK_CHARS = 1200
+    context_parts = [
+        f"[{i}] Source: {c['filename']} ({c['page_or_segment']})\n{c['text'][:_MAX_CHUNK_CHARS]}"
+        for i, c in enumerate(chunks, 1)
+    ]
+    user_prompt = (
+        f"Context:\n{chr(10).join(context_parts)}\n\nQuestion: {question}\n\nAnswer (with [n] citation markers):"
+    )
 
     groq_client = groq_sdk.Groq(api_key=settings.GROQ_API_KEY)
     for attempt in range(5):
         try:
             resp = groq_client.chat.completions.create(
-                model=settings.GROQ_PROCESSING_MODEL,
+                model=settings.GROQ_MODEL,
+                temperature=0,
                 messages=[
                     {"role": "system", "content": (
-                        "You are a document Q&A assistant. Answer using ONLY the context excerpts provided. "
+                        "You are a document Q&A assistant. Answer ONLY from the numbered context excerpts provided. "
+                        "Do NOT use any knowledge from outside these excerpts.\n"
                         "Every factual claim must be followed by a [n] citation marker. "
-                        "If the information is not in the context, say so."
+                        "If the information is not in the context, say: "
+                        "'The provided documents do not contain this information.'"
                     )},
                     {"role": "user", "content": user_prompt},
                 ],

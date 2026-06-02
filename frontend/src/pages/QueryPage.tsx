@@ -16,21 +16,41 @@ interface QueryResult {
 }
 interface HistoryItem { question: string; result: QueryResult; }
 
-const FILE_ICONS: Record<string, string> = { pdf: "PDF", docx: "DOC", xlsx: "XLS", csv: "CSV", image: "IMG", video: "VID", audio: "AUD" };
+const FILE_ICONS: Record<string, string> = {
+  pdf: "PDF", docx: "DOC", xlsx: "XLS", csv: "CSV", image: "IMG", video: "VID", audio: "AUD",
+};
 
-function scoreColor(v: number, isFaith = false): string {
+const SUGGESTED_QUERIES = [
+  "Summarize the key findings",
+  "What are the main risks?",
+  "List all action items",
+  "What conclusions were drawn?",
+];
+
+function ragasBadgeClass(v: number, isFaith = false): string {
   const hi = isFaith ? 0.8 : 0.7;
   const mid = isFaith ? 0.7 : 0.5;
-  if (v >= hi) return "bg-green-100 text-green-700";
-  if (v >= mid) return "bg-amber-100 text-amber-700";
-  return "bg-red-100 text-red-700";
+  if (v >= hi) return "badge badge-ok";
+  if (v >= mid) return "badge badge-warn";
+  return "badge badge-err";
 }
 
 function renderAnswer(text: string) {
   const parts = text.split(/(\[\d+\])/g);
   return parts.map((p, i) => {
     const m = p.match(/^\[(\d+)\]$/);
-    if (m) return <sup key={i} className="text-indigo-600 font-semibold cursor-pointer hover:underline" onClick={() => document.getElementById(`cite-${m[1]}`)?.scrollIntoView({ behavior: "smooth" })}>{p}</sup>;
+    if (m) {
+      return (
+        <sup
+          key={i}
+          className="cite"
+          style={{ cursor: "pointer", color: "var(--teal-link)", fontWeight: 600 }}
+          onClick={() => document.getElementById(`cite-${m[1]}`)?.scrollIntoView({ behavior: "smooth" })}
+        >
+          [{m[1]}]
+        </sup>
+      );
+    }
     return <span key={i}>{p}</span>;
   });
 }
@@ -39,7 +59,7 @@ export default function QueryPage() {
   const [docs, setDocs] = useState<Document[]>([]);
   const [docsLoading, setDocsLoading] = useState(true);
   const [docsError, setDocsError] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QueryResult | null>(null);
@@ -47,8 +67,7 @@ export default function QueryPage() {
   const [streaming, setStreaming] = useState(false);
   const [streamMode, setStreamMode] = useState(false);
   const [error, setError] = useState("");
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [queryHistory, setQueryHistory] = useState<HistoryItem[]>([]);
   const [copied, setCopied] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { addToast } = useToastContext();
@@ -65,15 +84,16 @@ export default function QueryPage() {
   useEffect(() => { loadDocs(); }, []);
 
   const toggleDoc = (id: string) =>
-    setSelected(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
+    setSelectedIds(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
+
   const toggleAll = () =>
-    setSelected(prev => prev.size === docs.length ? new Set() : new Set(docs.map(d => d.job_id)));
+    setSelectedIds(prev => prev.size === docs.length ? new Set() : new Set(docs.map(d => d.job_id)));
 
   const submitStream = async () => {
     setError(""); setLoading(true); setResult(null); setStreamingText(""); setStreaming(true);
     addToast("Query submitted", "info");
     const body: { question: string; job_ids?: string[] } = { question };
-    if (selected.size > 0) body.job_ids = [...selected];
+    if (selectedIds.size > 0) body.job_ids = [...selectedIds];
 
     try {
       const token = (api.defaults.headers.common["Authorization"] as string | undefined)?.replace("Bearer ", "");
@@ -120,7 +140,7 @@ export default function QueryPage() {
             };
             setResult(finalResult);
             setStreamingText("");
-            setHistory(prev => [{ question, result: finalResult }, ...prev.slice(0, 9)]);
+            setQueryHistory(prev => [{ question, result: finalResult }, ...prev.slice(0, 9)]);
           } else if (data.type === "error") {
             throw new Error(data.message);
           }
@@ -142,10 +162,10 @@ export default function QueryPage() {
     addToast("Query submitted", "info");
     try {
       const body: { question: string; job_ids?: string[] } = { question };
-      if (selected.size > 0) body.job_ids = [...selected];
+      if (selectedIds.size > 0) body.job_ids = [...selectedIds];
       const r = await api.post("/v1/query", body);
       setResult(r.data);
-      setHistory(prev => [{ question, result: r.data }, ...prev.slice(0, 9)]);
+      setQueryHistory(prev => [{ question, result: r.data }, ...prev.slice(0, 9)]);
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } };
       setError(err.response?.data?.detail || "Query failed");
@@ -165,150 +185,607 @@ export default function QueryPage() {
   };
 
   const displayAnswer = result?.answer || streamingText;
+  const latencyDisplay = result?.latency_ms ? `${(result.latency_ms / 1000).toFixed(1)}s` : "—";
+  const confidenceDisplay = result ? (result.confidence_gate_passed ? "High" : "Low") : "—";
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
       <NavBar />
-      <div className="flex flex-col md:flex-row max-w-6xl mx-auto px-4 py-6 gap-6">
-        {/* Sidebar */}
-        <aside className="w-full md:w-64 shrink-0">
-          <div className="bg-white rounded-xl shadow-sm border p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="font-semibold text-gray-700 text-sm">Documents</h2>
-              <button onClick={toggleAll} className="text-xs text-indigo-600 hover:underline">
-                {selected.size === docs.length && docs.length > 0 ? "Deselect all" : "Select all"}
-              </button>
-            </div>
-            {docsLoading && (
-              <div className="space-y-2">
-                {[...Array(3)].map((_, i) => <div key={i} className="h-6 bg-gray-200 animate-pulse rounded" />)}
-              </div>
-            )}
-            {docsError && (
-              <div className="text-center py-3">
-                <p className="text-xs text-red-500 mb-2">Failed to load documents</p>
-                <button onClick={loadDocs} className="text-xs text-indigo-600 hover:underline">Retry</button>
-              </div>
-            )}
-            {!docsLoading && !docsError && docs.length === 0 && (
-              <p className="text-xs text-gray-400">No completed documents</p>
-            )}
-            {docs.map(d => (
-              <label key={d.job_id} className="flex items-center gap-2 py-1 cursor-pointer hover:bg-gray-50 rounded px-1">
-                <input type="checkbox" checked={selected.has(d.job_id)} onChange={() => toggleDoc(d.job_id)} className="accent-indigo-600" />
-                <span className="text-xs font-mono bg-gray-100 px-1 rounded">{FILE_ICONS[d.file_type] || "DOC"}</span>
-                <span className="text-sm text-gray-700 truncate" title={d.filename}>{d.filename}</span>
-              </label>
-            ))}
-            {selected.size === 0 && docs.length > 0 && <p className="text-xs text-gray-400 mt-2">None selected — searches all</p>}
-          </div>
-        </aside>
 
-        {/* Main */}
-        <main className="flex-1 min-w-0">
-          <div className="bg-white rounded-xl shadow-sm border p-5">
-            <textarea ref={textareaRef} value={question} onChange={e => setQuestion(e.target.value)}
-              onKeyDown={handleKeyDown} rows={3} placeholder="Ask a question... (Ctrl+Enter to submit)"
-              className="w-full border rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-            <div className="flex items-center justify-between mt-2 flex-wrap gap-2">
-              {error && (
-                <span className="text-red-600 text-sm flex items-center gap-2">
-                  {error}
-                  <button onClick={submit} className="text-xs text-indigo-600 hover:underline">Retry</button>
-                </span>
-              )}
-              <div className="flex items-center gap-3 ml-auto">
-                <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
-                  <input type="checkbox" checked={streamMode} onChange={e => setStreamMode(e.target.checked)} className="accent-indigo-600" />
-                  Stream
-                </label>
-                <button onClick={submit} disabled={loading || !question.trim()}
-                  className="bg-indigo-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2">
-                  {loading && <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />}
-                  {loading ? (streaming ? "Streaming..." : "Searching...") : "Search"}
+      <div className="page">
+        {/* Page header */}
+        <div className="page-head">
+          <h1 className="page-title">Query your documents</h1>
+          <p className="page-sub">Ask questions across your indexed documents using semantic search and RAG.</p>
+        </div>
+
+        {/* Stat strip */}
+        <div className="stat-grid" style={{ marginBottom: 28 }}>
+          <div className="stat-card">
+            <div className="head">Indexed Documents</div>
+            <div className="v">{docs.length}</div>
+            <div className="k">ready to query</div>
+          </div>
+          <div className="stat-card">
+            <div className="head">Queries Today</div>
+            <div className="v">{queryHistory.length}</div>
+            <div className="k">this session</div>
+          </div>
+          <div className="stat-card">
+            <div className="head">Confidence</div>
+            <div
+              className="v"
+              style={{
+                color: result
+                  ? result.confidence_gate_passed ? "var(--ok-fg)" : "var(--warn-fg)"
+                  : "var(--slate-2)",
+                fontSize: "1.25rem",
+              }}
+            >
+              {confidenceDisplay}
+            </div>
+            <div className="k">last result</div>
+          </div>
+          <div className="stat-card">
+            <div className="head">Latency</div>
+            <div className="v">{latencyDisplay}</div>
+            <div className="k">last query</div>
+          </div>
+        </div>
+
+        {/* Query grid: sidebar + main */}
+        <div
+          className="query-grid"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "300px 1fr",
+            gap: 24,
+            alignItems: "start",
+          }}
+        >
+          {/* LEFT: Document panel */}
+          <aside className="doc-panel" style={{ position: "sticky", top: 80 }}>
+            <div className="card">
+              <div
+                className="doc-head"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "16px 20px 12px",
+                  borderBottom: "1px solid var(--line)",
+                }}
+              >
+                <h3 style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--navy)" }}>Documents</h3>
+                <button
+                  onClick={toggleAll}
+                  style={{
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    color: "var(--teal-link)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                >
+                  {selectedIds.size === docs.length && docs.length > 0 ? "Deselect All" : "Select All"}
                 </button>
               </div>
-            </div>
-          </div>
 
-          {(displayAnswer || result) && (
-            <div className="mt-4 bg-white rounded-xl shadow-sm border p-5 space-y-4">
-              {result && !result.confidence_gate_passed && (
-                <div className="bg-amber-50 border border-amber-200 text-amber-700 rounded px-3 py-2 text-sm">
-                  Low confidence — answer may be unreliable
-                </div>
-              )}
-              <div className="flex items-start justify-between gap-3">
-                <p className="text-gray-800 leading-relaxed flex-1">
-                  {result ? renderAnswer(result.answer) : <span>{streamingText}<span className="animate-pulse">▌</span></span>}
-                </p>
-                {result && (
-                  <button onClick={copyAnswer} title="Copy answer" className="shrink-0 text-gray-400 hover:text-gray-700 p-1 rounded transition-colors">
-                    {copied ? (
-                      <svg className="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                    ) : (
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                    )}
-                  </button>
+              <div className="doc-list" style={{ padding: "8px 12px 12px", maxHeight: 400, overflowY: "auto" }}>
+                {docsLoading && (
+                  <div style={{ padding: "8px 0" }}>
+                    {[0, 1, 2].map(i => (
+                      <div
+                        key={i}
+                        className="is-processing"
+                        style={{
+                          height: 32,
+                          background: "var(--line)",
+                          borderRadius: "var(--r-sm)",
+                          marginBottom: 8,
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {docsError && (
+                  <div style={{ textAlign: "center", padding: "12px 0" }}>
+                    <p style={{ fontSize: "0.8125rem", color: "var(--err-fg)", marginBottom: 6 }}>Failed to load documents</p>
+                    <button
+                      onClick={loadDocs}
+                      style={{ fontSize: "0.8125rem", color: "var(--teal-link)", fontWeight: 600, background: "none", border: "none", cursor: "pointer" }}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+
+                {!docsLoading && !docsError && docs.length === 0 && (
+                  <p style={{ fontSize: "0.8125rem", color: "var(--slate-2)", padding: "8px 4px" }}>No completed documents</p>
+                )}
+
+                {docs.map(d => (
+                  <label
+                    key={d.job_id}
+                    className="doc-item"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "7px 8px",
+                      borderRadius: "var(--r-sm)",
+                      cursor: "pointer",
+                      transition: "background var(--t-fast)",
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = "var(--tile)")}
+                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(d.job_id)}
+                      onChange={() => toggleDoc(d.job_id)}
+                      style={{ accentColor: "var(--mint)", flexShrink: 0 }}
+                    />
+                    <span className="ftype">{FILE_ICONS[d.file_type] || "DOC"}</span>
+                    <span
+                      className="fname"
+                      style={{
+                        fontFamily: "var(--font-mono)",
+                        fontSize: "0.8125rem",
+                        color: "var(--navy)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        flex: 1,
+                        minWidth: 0,
+                      }}
+                      title={d.filename}
+                    >
+                      {d.filename}
+                    </span>
+                  </label>
+                ))}
+
+                {selectedIds.size === 0 && docs.length > 0 && (
+                  <p style={{ fontSize: "0.75rem", color: "var(--slate-2)", padding: "4px 8px", marginTop: 4 }}>
+                    None selected — searches all
+                  </p>
                 )}
               </div>
+            </div>
+          </aside>
 
-              {result && result.citations?.length > 0 && (
-                <div className="border-t pt-3">
-                  <h3 className="text-sm font-semibold text-gray-600 mb-2">Citations</h3>
-                  {result.citations.map((c, i) => (
-                    <div id={`cite-${i + 1}`} key={i} className="text-sm text-gray-600 mb-2 pl-3 border-l-2 border-indigo-200">
-                      <span className="font-medium text-indigo-600">[{i + 1}]</span> {c.source || c.filename}{(c.page || c.page_or_segment) ? ` — ${c.page || c.page_or_segment}` : ""}
-                      {c.excerpt && <p className="text-gray-500 text-xs mt-0.5 line-clamp-2">{c.excerpt}</p>}
-                    </div>
+          {/* RIGHT: Main panel */}
+          <main style={{ display: "flex", flexDirection: "column", gap: 20, minWidth: 0 }}>
+            {/* Ask card */}
+            <div className="card ask-card">
+              <div className="card-pad">
+                <textarea
+                  ref={textareaRef}
+                  className="input"
+                  value={question}
+                  onChange={e => setQuestion(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  rows={4}
+                  placeholder="Ask a question… (Ctrl+Enter to submit)"
+                  style={{ marginBottom: 12 }}
+                />
+
+                {/* Suggested queries */}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+                  {SUGGESTED_QUERIES.map(q => (
+                    <button
+                      key={q}
+                      onClick={() => setQuestion(q)}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        fontSize: "0.8125rem",
+                        fontWeight: 500,
+                        color: "var(--teal-link)",
+                        background: "var(--mint-soft)",
+                        border: "1px solid var(--line)",
+                        borderRadius: "var(--r-full)",
+                        padding: "4px 12px",
+                        cursor: "pointer",
+                        transition: "background var(--t-fast)",
+                        fontFamily: "var(--font-body)",
+                      }}
+                    >
+                      {q}
+                    </button>
                   ))}
                 </div>
-              )}
 
-              {result && (result.ragas_scores && Object.keys(result.ragas_scores).length > 0 ? (
-                <div className="border-t pt-3 flex gap-2 flex-wrap">
-                  {Object.entries(result.ragas_scores).map(([k, v]) => (
-                    <span key={k} className={`text-xs px-2 py-1 rounded-full font-medium ${scoreColor(v, k === "faithfulness")}`}>
-                      {k.replace(/_/g, " ")}: {v.toFixed(2)}
+                <div className="ask-row" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  {error && (
+                    <span style={{ color: "var(--err-fg)", fontSize: "0.875rem", flex: 1 }}>
+                      {error}{" "}
+                      <button
+                        onClick={submit}
+                        style={{ color: "var(--teal-link)", fontWeight: 600, background: "none", border: "none", cursor: "pointer", fontSize: "0.875rem" }}
+                      >
+                        Retry
+                      </button>
                     </span>
-                  ))}
+                  )}
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        fontSize: "0.8375rem",
+                        fontWeight: 500,
+                        color: "var(--slate)",
+                        cursor: "pointer",
+                        userSelect: "none",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={streamMode}
+                        onChange={e => setStreamMode(e.target.checked)}
+                        style={{ accentColor: "var(--mint)" }}
+                      />
+                      Stream
+                    </label>
+
+                    <button
+                      className="btn btn-mint"
+                      onClick={submit}
+                      disabled={loading || !question.trim()}
+                    >
+                      {loading && (
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 14,
+                            height: 14,
+                            border: "2px solid var(--forest)",
+                            borderTopColor: "transparent",
+                            borderRadius: "50%",
+                            animation: "spin 0.7s linear infinite",
+                          }}
+                        />
+                      )}
+                      {loading ? (streaming ? "Streaming…" : "Searching…") : "Search"}
+                    </button>
+                  </div>
                 </div>
-              ) : (
-                <div className="border-t pt-3">
-                  <span className="text-xs bg-gray-100 text-gray-500 px-2 py-1 rounded-full animate-pulse">
-                    Evaluating quality scores...
+              </div>
+            </div>
+
+            {/* Answer card */}
+            {(displayAnswer || result) && (
+              <div className="card card-pad" style={{ animation: "fadeIn 200ms ease both" }}>
+                {/* Answer meta row */}
+                <div
+                  className="a-meta"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 14,
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: "50%",
+                      background: result
+                        ? result.confidence_gate_passed ? "var(--ok-fg)" : "var(--warn-fg)"
+                        : "var(--slate-2)",
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span style={{ fontSize: "0.8125rem", fontWeight: 700, color: "var(--slate-2)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                    Answer
+                  </span>
+                  <div style={{ flex: 1 }} />
+                  {result && (
+                    <button
+                      onClick={copyAnswer}
+                      title="Copy answer"
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 5,
+                        fontSize: "0.8125rem",
+                        fontWeight: 600,
+                        color: copied ? "var(--ok-fg)" : "var(--slate-2)",
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        padding: "4px 8px",
+                        borderRadius: "var(--r-sm)",
+                        transition: "color var(--t-fast)",
+                      }}
+                    >
+                      {copied ? (
+                        <>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M20 6L9 17l-5-5" />
+                          </svg>
+                          Copied
+                        </>
+                      ) : (
+                        <>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" />
+                            <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                          </svg>
+                          Copy
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+
+                {/* Confidence warning banner */}
+                {result && !result.confidence_gate_passed && (
+                  <div
+                    style={{
+                      background: "var(--warn-bg)",
+                      color: "var(--warn-fg)",
+                      border: "1px solid var(--warn-fg)",
+                      borderRadius: "var(--r-md)",
+                      padding: "10px 14px",
+                      fontSize: "0.875rem",
+                      fontWeight: 500,
+                      marginBottom: 14,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                      <line x1="12" y1="9" x2="12" y2="13" />
+                      <line x1="12" y1="17" x2="12.01" y2="17" />
+                    </svg>
+                    Low confidence — answer may be unreliable. Consider refining your question.
+                  </div>
+                )}
+
+                {/* Answer text */}
+                <p
+                  style={{
+                    color: "var(--navy)",
+                    lineHeight: 1.75,
+                    fontSize: "0.9375rem",
+                    marginBottom: result ? 20 : 0,
+                  }}
+                >
+                  {result
+                    ? renderAnswer(result.answer)
+                    : <>{streamingText}<span style={{ animation: "pulse 1s ease infinite", opacity: 0.7 }}>▌</span></>
+                  }
+                </p>
+
+                {/* RAGAS scores */}
+                {result && result.ragas_scores && Object.keys(result.ragas_scores).length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                    {Object.entries(result.ragas_scores).map(([k, v]) => (
+                      <span key={k} className={ragasBadgeClass(v, k === "faithfulness")}>
+                        {k.replace(/_/g, " ")}: {v.toFixed(2)}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {result && !(result.ragas_scores && Object.keys(result.ragas_scores).length > 0) && (
+                  <div style={{ marginBottom: 16 }}>
+                    <span className="badge badge-neutral is-processing">Evaluating quality scores…</span>
+                  </div>
+                )}
+
+                {/* Token / latency metadata */}
+                {result && (result.prompt_tokens || result.latency_ms) && (
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 16,
+                      flexWrap: "wrap",
+                      fontSize: "0.8125rem",
+                      fontFamily: "var(--font-mono)",
+                      color: "var(--slate-2)",
+                      borderTop: "1px solid var(--line-2)",
+                      paddingTop: 12,
+                      marginBottom: result.citations?.length > 0 ? 20 : 0,
+                    }}
+                  >
+                    {result.prompt_tokens && <span>prompt: {result.prompt_tokens} tok</span>}
+                    {result.completion_tokens && <span>completion: {result.completion_tokens} tok</span>}
+                    {result.latency_ms && <span>latency: {result.latency_ms}ms</span>}
+                  </div>
+                )}
+
+                {/* Sources section */}
+                {result && result.citations?.length > 0 && (
+                  <div className="sources" style={{ borderTop: "1px solid var(--line)", paddingTop: 18 }}>
+                    <h4
+                      style={{
+                        fontSize: "0.8375rem",
+                        fontWeight: 700,
+                        color: "var(--slate)",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.07em",
+                        marginBottom: 14,
+                      }}
+                    >
+                      Sources &middot; {result.citations.length} chunk{result.citations.length !== 1 ? "s" : ""}
+                    </h4>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      {result.citations.map((c, i) => (
+                        <div
+                          id={`cite-${i + 1}`}
+                          key={i}
+                          className="src"
+                          style={{
+                            display: "flex",
+                            gap: 12,
+                            padding: "12px 14px",
+                            background: "var(--tile)",
+                            border: "1px solid var(--line)",
+                            borderRadius: "var(--r-md)",
+                            borderLeft: "3px solid var(--mint)",
+                          }}
+                        >
+                          <span
+                            style={{
+                              flexShrink: 0,
+                              width: 22,
+                              height: 22,
+                              borderRadius: "var(--r-full)",
+                              background: "var(--mint-soft)",
+                              color: "var(--ok-fg)",
+                              fontSize: "0.75rem",
+                              fontWeight: 700,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              marginTop: 1,
+                            }}
+                          >
+                            {i + 1}
+                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div
+                              style={{
+                                fontFamily: "var(--font-mono)",
+                                fontWeight: 600,
+                                fontSize: "0.8375rem",
+                                color: "var(--navy)",
+                                marginBottom: 4,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {c.source || c.filename || "unknown"}
+                              {(c.page || c.page_or_segment) && (
+                                <span style={{ fontWeight: 400, color: "var(--slate-2)", marginLeft: 6 }}>
+                                  — {c.page || c.page_or_segment}
+                                </span>
+                              )}
+                            </div>
+                            {c.excerpt && (
+                              <p
+                                style={{
+                                  fontSize: "0.8375rem",
+                                  color: "var(--slate)",
+                                  lineHeight: 1.55,
+                                  display: "-webkit-box",
+                                  WebkitLineClamp: 3,
+                                  WebkitBoxOrient: "vertical",
+                                  overflow: "hidden",
+                                }}
+                              >
+                                {c.excerpt}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Query history */}
+            {queryHistory.length > 0 && (
+              <div className="card card-pad">
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 14,
+                  }}
+                >
+                  <h4
+                    style={{
+                      fontSize: "0.8375rem",
+                      fontWeight: 700,
+                      color: "var(--slate-2)",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.07em",
+                    }}
+                  >
+                    Recent Queries
+                  </h4>
+                  <span
+                    className="badge badge-neutral"
+                    style={{ fontFamily: "var(--font-mono)" }}
+                  >
+                    {queryHistory.length}
                   </span>
                 </div>
-              ))}
-
-              {result && (result.prompt_tokens || result.latency_ms) && (
-                <div className="border-t pt-2 text-xs text-gray-400 flex gap-4">
-                  {result.prompt_tokens && <span>Prompt: {result.prompt_tokens} tok</span>}
-                  {result.completion_tokens && <span>Completion: {result.completion_tokens} tok</span>}
-                  {result.latency_ms && <span>Latency: {result.latency_ms}ms</span>}
-                </div>
-              )}
-            </div>
-          )}
-
-          {history.length > 0 && (
-            <div className="mt-4">
-              <button onClick={() => setHistoryOpen(o => !o)} className="text-sm text-indigo-600 hover:underline mb-2">
-                {historyOpen ? "Hide" : "Show"} query history ({history.length})
-              </button>
-              {historyOpen && (
-                <div className="space-y-2">
-                  {history.map((h, i) => (
-                    <div key={i} className="bg-white rounded-lg border px-4 py-2 text-sm cursor-pointer hover:bg-gray-50"
-                      onClick={() => { setQuestion(h.question); setResult(h.result); }}>
-                      <p className="text-gray-700 truncate">{h.question}</p>
-                    </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {queryHistory.map((h, i) => (
+                    <button
+                      key={i}
+                      onClick={() => { setQuestion(h.question); setResult(h.result); }}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        padding: "9px 12px",
+                        borderRadius: "var(--r-md)",
+                        background: "transparent",
+                        border: "1px solid var(--line-2)",
+                        cursor: "pointer",
+                        textAlign: "left",
+                        fontFamily: "var(--font-body)",
+                        transition: "background var(--t-fast), border-color var(--t-fast)",
+                        width: "100%",
+                      }}
+                      onMouseEnter={e => {
+                        e.currentTarget.style.background = "var(--tile)";
+                        e.currentTarget.style.borderColor = "var(--line)";
+                      }}
+                      onMouseLeave={e => {
+                        e.currentTarget.style.background = "transparent";
+                        e.currentTarget.style.borderColor = "var(--line-2)";
+                      }}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--slate-2)" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                        <circle cx="11" cy="11" r="8" />
+                        <path d="m21 21-4.35-4.35" />
+                      </svg>
+                      <span
+                        style={{
+                          fontSize: "0.875rem",
+                          color: "var(--navy)",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          flex: 1,
+                        }}
+                      >
+                        {h.question}
+                      </span>
+                      <span
+                        className={`badge ${h.result.confidence_gate_passed ? "badge-ok" : "badge-warn"}`}
+                        style={{ fontSize: "0.6875rem", flexShrink: 0 }}
+                      >
+                        {h.result.confidence_gate_passed ? "High" : "Low"}
+                      </span>
+                    </button>
                   ))}
                 </div>
-              )}
-            </div>
-          )}
-        </main>
+              </div>
+            )}
+          </main>
+        </div>
       </div>
     </div>
   );

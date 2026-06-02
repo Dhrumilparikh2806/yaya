@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import NavBar from "../components/NavBar";
 import api from "../api/client";
 
 interface Job {
-  id: string;
+  job_id: string;
   filename: string;
   file_type: string;
   status: string;
@@ -15,18 +15,50 @@ interface Job {
   result?: Record<string, unknown>;
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  PENDING: "bg-gray-100 text-gray-600",
-  PROCESSING: "bg-blue-100 text-blue-600",
-  COMPLETED: "bg-green-100 text-green-600",
-  FAILED: "bg-red-100 text-red-600",
-  FAILED_PERMANENT: "bg-red-200 text-red-800",
+const STATUS_BADGE: Record<string, string> = {
+  COMPLETED: "badge badge-ok",
+  PROCESSING: "badge badge-warn",
+  PENDING: "badge badge-neutral",
+  FAILED: "badge badge-err",
+  FAILED_PERMANENT: "badge badge-err",
 };
+
 const FILE_ICONS: Record<string, string> = {
-  pdf: "📄", docx: "📝", xlsx: "📊", csv: "📊", image: "🖼️", video: "🎬", audio: "🎵",
+  pdf: "📄",
+  docx: "📝",
+  xlsx: "📊",
+  csv: "📊",
+  image: "🖼️",
+  video: "🎬",
+  audio: "🎵",
 };
 
 type SortKey = keyof Job;
+type FilterTab = "all" | "completed" | "pending" | "processing" | "failed";
+
+const FILTER_TABS: { key: FilterTab; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "completed", label: "Completed" },
+  { key: "pending", label: "Pending" },
+  { key: "processing", label: "Processing" },
+  { key: "failed", label: "Failed" },
+];
+
+const jobId = (j: Job) => j.job_id;
+
+function fmtDate(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -35,9 +67,12 @@ export default function JobsPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("created_at");
   const [sortAsc, setSortAsc] = useState(false);
+  const [filter, setFilter] = useState<FilterTab>("all");
   const [drawerJob, setDrawerJob] = useState<Job | null>(null);
+  const [drawerLoading, setDrawerLoading] = useState(false);
+  const [reprocessingAll, setReprocessingAll] = useState(false);
 
-  const fetchJobs = async () => {
+  const fetchJobs = useCallback(async () => {
     setFetchError(false);
     try {
       const r = await api.get("/v1/jobs");
@@ -47,199 +82,611 @@ export default function JobsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchJobs();
     const interval = setInterval(fetchJobs, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchJobs]);
 
   const sort = (key: SortKey) => {
     if (sortKey === key) setSortAsc(a => !a);
     else { setSortKey(key); setSortAsc(true); }
   };
 
-  const sorted = [...jobs].sort((a, b) => {
-    const va = a[sortKey] ?? ""; const vb = b[sortKey] ?? "";
-    const cmp = String(va).localeCompare(String(vb));
-    return sortAsc ? cmp : -cmp;
-  });
+  const filterFn = (j: Job): boolean => {
+    if (filter === "all") return true;
+    if (filter === "completed") return j.status === "COMPLETED";
+    if (filter === "pending") return j.status === "PENDING";
+    if (filter === "processing") return j.status === "PROCESSING";
+    if (filter === "failed") return j.status === "FAILED" || j.status === "FAILED_PERMANENT";
+    return true;
+  };
+
+  const sorted = [...jobs]
+    .filter(filterFn)
+    .sort((a, b) => {
+      const va = a[sortKey] ?? "";
+      const vb = b[sortKey] ?? "";
+      const cmp = String(va).localeCompare(String(vb), undefined, { numeric: true });
+      return sortAsc ? cmp : -cmp;
+    });
 
   const openSummary = async (job: Job, e: React.MouseEvent) => {
     e.stopPropagation();
     if (job.result) { setDrawerJob(job); return; }
+    setDrawerLoading(true);
+    setDrawerJob(job);
     try {
-      const r = await api.get(`/v1/documents/${job.id}/summary`);
+      const r = await api.get(`/v1/documents/${jobId(job)}/summary`);
       const enriched = { ...job, result: r.data.summary };
-      setJobs(prev => prev.map(j => j.id === job.id ? enriched : j));
+      setJobs(prev => prev.map(j => jobId(j) === jobId(job) ? enriched : j));
       setDrawerJob(enriched);
-    } catch { setDrawerJob(job); }
+    } catch {
+      setDrawerJob(job);
+    } finally {
+      setDrawerLoading(false);
+    }
   };
 
-  const Th = ({ label, k }: { label: string; k: SortKey }) => (
-    <th className="text-left px-4 py-2 text-xs font-semibold text-gray-500 uppercase cursor-pointer hover:text-gray-800 select-none whitespace-nowrap"
-      onClick={() => sort(k)}>
-      {label} {sortKey === k ? (sortAsc ? "↑" : "↓") : ""}
+  const reprocess = async (job: Job, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await api.post(`/v1/jobs/${jobId(job)}/reprocess`);
+      fetchJobs();
+    } catch { /* ignore */ }
+  };
+
+  const reprocessAllFailed = async () => {
+    const failed = jobs.filter(j => j.status === "FAILED" || j.status === "FAILED_PERMANENT");
+    if (failed.length === 0) return;
+    setReprocessingAll(true);
+    try {
+      await Promise.allSettled(failed.map(j => api.post(`/v1/jobs/${jobId(j)}/reprocess`)));
+      fetchJobs();
+    } finally {
+      setReprocessingAll(false);
+    }
+  };
+
+  // Stats
+  const total = jobs.length;
+  const completed = jobs.filter(j => j.status === "COMPLETED").length;
+  const inProgress = jobs.filter(j => j.status === "PROCESSING" || j.status === "PENDING").length;
+  const failed = jobs.filter(j => j.status === "FAILED" || j.status === "FAILED_PERMANENT").length;
+
+  const SortTh = ({ label, k }: { label: string; k: SortKey }) => (
+    <th
+      onClick={() => sort(k)}
+      style={{ cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }}
+    >
+      {label}
+      {sortKey === k ? (sortAsc ? " ↑" : " ↓") : ""}
     </th>
   );
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
       <NavBar />
-      <div className="max-w-5xl mx-auto px-4 py-8">
-        <div className="flex items-center justify-between mb-6">
-          <h1 className="text-2xl font-bold text-gray-800">Jobs</h1>
-          <div className="flex items-center gap-3">
-            {fetchError && (
-              <button onClick={fetchJobs} className="text-xs text-indigo-600 hover:underline border border-indigo-200 px-2 py-1 rounded">
-                Retry
-              </button>
-            )}
-            <span className="text-xs text-gray-400">Auto-refreshes every 10s</span>
+
+      <div className="page">
+        {/* Page header */}
+        <div className="page-head jobs-head" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: "1rem" }}>
+          <div>
+            <h1 className="page-title">Jobs</h1>
+            <p className="page-sub">Ingestion status across your documents.</p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
+            <span
+              className="pulse"
+              style={{
+                display: "inline-block",
+                width: "8px",
+                height: "8px",
+                borderRadius: "50%",
+                background: "var(--mint)",
+                animation: "pulse 1.8s ease-in-out infinite",
+              }}
+            />
+            <span style={{ fontSize: "0.78rem", color: "var(--slate-2)" }}>Auto-refreshes every 10s</span>
           </div>
         </div>
 
+        {/* Stat strip */}
+        <div className="stat-grid" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginBottom: "1.5rem" }}>
+          <div className="stat-card">
+            <span className="k">Total Jobs</span>
+            <span className="v">{total}</span>
+          </div>
+          <div className="stat-card">
+            <span className="k">Completed</span>
+            <span className="v" style={{ color: "var(--ok-fg)" }}>{completed}</span>
+          </div>
+          <div className="stat-card">
+            <span className="k">Processing / Pending</span>
+            <span className="v" style={{ color: "var(--warn-fg)" }}>{inProgress}</span>
+          </div>
+          <div className="stat-card">
+            <span className="k">Failed</span>
+            <span className="v" style={{ color: "var(--err-fg)" }}>{failed}</span>
+          </div>
+        </div>
+
+        {/* Error banner */}
         {fetchError && !loading && (
-          <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm mb-4">
-            Failed to load jobs. Check your connection and try again.
+          <div
+            className="badge badge-err"
+            style={{
+              display: "block",
+              padding: "0.75rem 1rem",
+              borderRadius: "8px",
+              marginBottom: "1rem",
+              fontSize: "0.85rem",
+              background: "var(--err-bg)",
+              color: "var(--err-fg)",
+            }}
+          >
+            Failed to load jobs. Check your connection and try again.{" "}
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={fetchJobs}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              Retry
+            </button>
           </div>
         )}
 
-        {loading ? (
-          <div className="space-y-2">
-            {[...Array(5)].map((_, i) => <div key={i} className="h-12 bg-gray-200 animate-pulse rounded-lg" />)}
+        {/* Section head: filter tabs + re-process all failed */}
+        <div className="section-head" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "0.75rem", marginBottom: "0.75rem" }}>
+          <div className="seg" style={{ display: "flex", gap: "2px" }}>
+            {FILTER_TABS.map(tab => (
+              <button
+                key={tab.key}
+                className={filter === tab.key ? "active" : ""}
+                onClick={() => setFilter(tab.key)}
+                style={{ cursor: "pointer" }}
+              >
+                {tab.label}
+                {tab.key !== "all" && (
+                  <span style={{ marginLeft: "5px", fontSize: "0.7rem", opacity: 0.7 }}>
+                    ({tab.key === "completed" ? completed
+                      : tab.key === "pending" ? jobs.filter(j => j.status === "PENDING").length
+                      : tab.key === "processing" ? jobs.filter(j => j.status === "PROCESSING").length
+                      : failed})
+                  </span>
+                )}
+              </button>
+            ))}
           </div>
-        ) : (
-          <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px]">
-                <thead className="border-b bg-gray-50">
+          {failed > 0 && (
+            <button
+              onClick={reprocessAllFailed}
+              disabled={reprocessingAll}
+              style={{
+                fontSize: "0.8rem",
+                color: "var(--err-fg)",
+                background: "none",
+                border: "none",
+                cursor: reprocessingAll ? "not-allowed" : "pointer",
+                textDecoration: "underline",
+                opacity: reprocessingAll ? 0.6 : 1,
+                padding: 0,
+              }}
+            >
+              {reprocessingAll ? "Re-processing..." : "Re-process all failed"}
+            </button>
+          )}
+        </div>
+
+        {/* Table card */}
+        <div className="card" style={{ overflow: "hidden", padding: 0 }}>
+          {loading ? (
+            <div style={{ padding: "2rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              {[...Array(5)].map((_, i) => (
+                <div
+                  key={i}
+                  style={{
+                    height: "44px",
+                    borderRadius: "6px",
+                    background: "var(--line-2)",
+                    animation: "pulse 1.5s ease-in-out infinite",
+                  }}
+                />
+              ))}
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table className="tbl" style={{ minWidth: "860px" }}>
+                <thead>
                   <tr>
-                    <Th label="File" k="filename" />
-                    <Th label="Type" k="file_type" />
-                    <Th label="Status" k="status" />
-                    <Th label="Step" k="step" />
-                    <Th label="Retries" k="retry_count" />
-                    <Th label="Created" k="created_at" />
+                    <SortTh label="File" k="filename" />
+                    <th style={{ whiteSpace: "nowrap" }}>Job ID</th>
+                    <SortTh label="Type" k="file_type" />
+                    <SortTh label="Status" k="status" />
+                    <SortTh label="Step" k="step" />
+                    <th>Chunks</th>
+                    <SortTh label="Retries" k="retry_count" />
+                    <SortTh label="Created" k="created_at" />
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
                   {sorted.map(j => (
-                    <React.Fragment key={j.id}>
+                    <React.Fragment key={jobId(j)}>
                       <tr
-                        className="border-b hover:bg-gray-50 cursor-pointer"
-                        onClick={() => setExpanded(expanded === j.id ? null : j.id)}
+                        onClick={() => setExpanded(expanded === jobId(j) ? null : jobId(j))}
+                        style={{ cursor: "pointer" }}
+                        className={expanded === jobId(j) ? "expanded" : undefined}
                       >
-                        <td className="px-4 py-3 text-sm text-gray-800">
-                          <span className="mr-1">{FILE_ICONS[j.file_type] || "📄"}</span>{j.filename}
+                        {/* File */}
+                        <td>
+                          <div className="fcell" style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
+                            <span className="ftype" style={{ fontSize: "1.1rem", flexShrink: 0 }}>
+                              {FILE_ICONS[j.file_type] || "📄"}
+                            </span>
+                            <span
+                              className="nm"
+                              style={{
+                                fontFamily: "var(--mono, 'JetBrains Mono', monospace)",
+                                fontSize: "0.78rem",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                maxWidth: "180px",
+                                display: "block",
+                              }}
+                              title={j.filename}
+                            >
+                              {j.filename}
+                            </span>
+                          </div>
                         </td>
-                        <td className="px-4 py-3 text-xs text-gray-500 uppercase">{j.file_type}</td>
-                        <td className="px-4 py-3">
-                          <span className={`text-xs px-2 py-1 rounded-full font-medium ${STATUS_COLORS[j.status] || "bg-gray-100"}`}>
-                            {j.status}
+
+                        {/* Job ID */}
+                        <td>
+                          <span
+                            className="jid"
+                            style={{
+                              fontFamily: "var(--mono, 'JetBrains Mono', monospace)",
+                              fontSize: "0.7rem",
+                              color: "var(--slate-2)",
+                              display: "block",
+                              maxWidth: "110px",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                            title={j.job_id}
+                          >
+                            {j.job_id}
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-xs text-gray-500">{j.step || "—"}</td>
-                        <td className="px-4 py-3 text-xs text-gray-500">{j.retry_count}</td>
-                        <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{new Date(j.created_at).toLocaleString()}</td>
+
+                        {/* Type */}
+                        <td>
+                          <span
+                            className="ftype badge badge-neutral"
+                            style={{ textTransform: "uppercase", fontSize: "0.68rem" }}
+                          >
+                            {j.file_type}
+                          </span>
+                        </td>
+
+                        {/* Status */}
+                        <td>
+                          <span className={STATUS_BADGE[j.status] || "badge badge-neutral"}>
+                            {j.status.replace("_", " ")}
+                          </span>
+                        </td>
+
+                        {/* Step */}
+                        <td>
+                          <span
+                            className="step"
+                            style={{
+                              fontFamily: "var(--mono, 'JetBrains Mono', monospace)",
+                              fontSize: "0.72rem",
+                              color: "var(--slate)",
+                            }}
+                          >
+                            {j.step || "—"}
+                          </span>
+                        </td>
+
+                        {/* Chunks */}
+                        <td>
+                          <span className="num" style={{ fontSize: "0.82rem", color: "var(--slate)" }}>
+                            {j.chunk_count !== undefined ? j.chunk_count : "—"}
+                          </span>
+                        </td>
+
+                        {/* Retries */}
+                        <td>
+                          <span
+                            className="num"
+                            style={{
+                              fontSize: "0.82rem",
+                              color: j.retry_count > 0 ? "var(--warn-fg)" : "var(--slate-2)",
+                              fontWeight: j.retry_count > 0 ? 600 : 400,
+                            }}
+                          >
+                            {j.retry_count}
+                          </span>
+                        </td>
+
+                        {/* Created */}
+                        <td style={{ whiteSpace: "nowrap", fontSize: "0.78rem", color: "var(--slate-2)" }}>
+                          {fmtDate(j.created_at)}
+                        </td>
+
+                        {/* Actions */}
+                        <td onClick={e => e.stopPropagation()} style={{ whiteSpace: "nowrap" }}>
+                          <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                            {j.status === "COMPLETED" && (
+                              <button
+                                className="btn btn-ghost btn-sm"
+                                onClick={e => openSummary(j, e)}
+                              >
+                                View Summary
+                              </button>
+                            )}
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              onClick={e => reprocess(j, e)}
+                            >
+                              Re-process
+                            </button>
+                          </div>
+                        </td>
                       </tr>
-                      {expanded === j.id && (
-                        <tr className="bg-gray-50 border-b">
-                          <td colSpan={6} className="px-4 py-3 text-sm text-gray-700">
-                            <div className="grid grid-cols-2 gap-2">
-                              <div><span className="font-medium text-gray-500">Job ID:</span> <span className="font-mono text-xs">{j.id}</span></div>
+
+                      {/* Expanded sub-row */}
+                      {expanded === jobId(j) && (
+                        <tr style={{ background: "var(--tile)" }}>
+                          <td
+                            colSpan={9}
+                            style={{ padding: "0.75rem 1.25rem 1rem" }}
+                            onClick={e => e.stopPropagation()}
+                          >
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "0.5rem 1.5rem", fontSize: "0.8rem", color: "var(--slate)" }}>
+                              <div>
+                                <span style={{ fontWeight: 600, color: "var(--slate-2)", marginRight: "0.4rem" }}>Job ID:</span>
+                                <span
+                                  style={{
+                                    fontFamily: "var(--mono, 'JetBrains Mono', monospace)",
+                                    fontSize: "0.72rem",
+                                    wordBreak: "break-all",
+                                  }}
+                                >
+                                  {j.job_id}
+                                </span>
+                              </div>
                               {j.chunk_count !== undefined && (
-                                <div><span className="font-medium text-gray-500">Chunks:</span> {j.chunk_count}</div>
-                              )}
-                              {j.error_message && (
-                                <div className="col-span-2 text-red-600">
-                                  <span className="font-medium">Error:</span> {j.error_message}
+                                <div>
+                                  <span style={{ fontWeight: 600, color: "var(--slate-2)", marginRight: "0.4rem" }}>Chunks:</span>
+                                  <span>{j.chunk_count}</span>
                                 </div>
                               )}
-                              <div className="col-span-2 mt-1 flex gap-2 flex-wrap">
-                              {j.status === "COMPLETED" && (
-                                <button
-                                  onClick={e => openSummary(j, e)}
-                                  className="text-xs bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full hover:bg-indigo-100">
-                                  View Summary
-                                </button>
+                              {j.error_message && (
+                                <div style={{ gridColumn: "1 / -1", color: "var(--err-fg)" }}>
+                                  <span style={{ fontWeight: 600, marginRight: "0.4rem" }}>Error:</span>
+                                  <span>{j.error_message}</span>
+                                </div>
                               )}
-                              {(j.status === "COMPLETED" || j.status === "FAILED" || j.status === "FAILED_PERMANENT") && (
+                              <div style={{ gridColumn: "1 / -1", display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.25rem" }}>
+                                {j.status === "COMPLETED" && (
+                                  <button
+                                    className="btn btn-ghost btn-sm"
+                                    onClick={e => openSummary(j, e)}
+                                  >
+                                    View Summary
+                                  </button>
+                                )}
                                 <button
-                                  onClick={async e => {
-                                    e.stopPropagation();
-                                    try {
-                                      await api.post(`/v1/jobs/${j.id}/reprocess`);
-                                      fetchJobs();
-                                    } catch { /* ignore */ }
-                                  }}
-                                  className="text-xs bg-gray-100 text-gray-600 px-3 py-1 rounded-full hover:bg-gray-200">
+                                  className="btn btn-ghost btn-sm"
+                                  onClick={e => reprocess(j, e)}
+                                >
                                   Re-process
                                 </button>
-                              )}
-                            </div>
+                              </div>
                             </div>
                           </td>
                         </tr>
                       )}
                     </React.Fragment>
                   ))}
-                  {sorted.length === 0 && !fetchError && (
+
+                  {sorted.length === 0 && !loading && (
                     <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-gray-400 text-sm">
-                        No jobs yet — upload a file to get started
+                      <td
+                        colSpan={9}
+                        style={{ padding: "3rem 1rem", textAlign: "center", color: "var(--slate-2)", fontSize: "0.88rem" }}
+                      >
+                        {filter === "all"
+                          ? "No jobs yet — upload a file to get started"
+                          : `No ${filter} jobs`}
                       </td>
                     </tr>
                   )}
                 </tbody>
               </table>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* Summary drawer */}
       {drawerJob && (
         <>
-          <div className="fixed inset-0 bg-black/30 z-40" onClick={() => setDrawerJob(null)} />
-          <div className="fixed right-0 top-0 h-full w-full sm:w-96 bg-white shadow-2xl z-50 flex flex-col">
-            <div className="px-5 py-4 border-b flex items-center justify-between">
-              <div>
-                <h2 className="font-semibold text-gray-800">{drawerJob.filename}</h2>
-                <p className="text-xs text-gray-400 mt-0.5 uppercase">{drawerJob.file_type}</p>
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(4,9,26,0.35)",
+              zIndex: 40,
+            }}
+            onClick={() => setDrawerJob(null)}
+          />
+          <div
+            style={{
+              position: "fixed",
+              right: 0,
+              top: 0,
+              height: "100%",
+              width: "min(420px, 100vw)",
+              background: "var(--card)",
+              boxShadow: "-4px 0 32px rgba(4,9,26,0.12)",
+              zIndex: 50,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {/* Drawer header */}
+            <div
+              style={{
+                padding: "1.1rem 1.25rem",
+                borderBottom: "1px solid var(--line)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <p
+                  style={{
+                    fontWeight: 600,
+                    color: "var(--ink)",
+                    fontSize: "0.95rem",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {drawerJob.filename}
+                </p>
+                <p
+                  style={{
+                    fontSize: "0.7rem",
+                    color: "var(--slate-2)",
+                    marginTop: "2px",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  {drawerJob.file_type}
+                </p>
               </div>
-              <button onClick={() => setDrawerJob(null)} className="text-gray-400 hover:text-gray-700 text-xl font-bold">×</button>
+              <button
+                onClick={() => setDrawerJob(null)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  fontSize: "1.4rem",
+                  color: "var(--slate-2)",
+                  cursor: "pointer",
+                  lineHeight: 1,
+                  flexShrink: 0,
+                  marginLeft: "0.75rem",
+                }}
+                aria-label="Close"
+              >
+                ×
+              </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-3">
-              {drawerJob.chunk_count !== undefined && (
-                <div className="bg-indigo-50 rounded-lg px-3 py-2 text-sm">
-                  <span className="font-medium text-indigo-700">Chunks indexed:</span>
-                  <span className="ml-2 text-indigo-600">{drawerJob.chunk_count}</span>
+
+            {/* Drawer body */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "1.25rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              {drawerLoading ? (
+                <div style={{ padding: "2rem 0", textAlign: "center", color: "var(--slate-2)", fontSize: "0.85rem" }}>
+                  Loading summary...
                 </div>
-              )}
-              {drawerJob.result && Object.keys(drawerJob.result).length > 0 ? (
-                Object.entries(drawerJob.result).map(([k, v]) => (
-                  <div key={k} className="border rounded-lg p-3">
-                    <p className="text-xs font-semibold text-gray-500 uppercase mb-1">{k.replace(/_/g, " ")}</p>
-                    {Array.isArray(v) ? (
-                      <ul className="list-disc list-inside text-sm text-gray-700 space-y-0.5">
-                        {(v as unknown[]).map((item, i) => <li key={i}>{String(item)}</li>)}
-                      </ul>
-                    ) : typeof v === "object" && v !== null ? (
-                      <pre className="text-xs text-gray-600 whitespace-pre-wrap">{JSON.stringify(v, null, 2)}</pre>
-                    ) : (
-                      <p className="text-sm text-gray-700">{String(v)}</p>
-                    )}
-                  </div>
-                ))
               ) : (
-                <p className="text-sm text-gray-400 text-center mt-8">No summary data available</p>
+                <>
+                  {drawerJob.chunk_count !== undefined && (
+                    <div
+                      style={{
+                        background: "var(--mint-soft)",
+                        borderRadius: "8px",
+                        padding: "0.6rem 0.9rem",
+                        fontSize: "0.85rem",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                      }}
+                    >
+                      <span style={{ fontWeight: 600, color: "var(--ok-fg)" }}>Chunks indexed:</span>
+                      <span style={{ color: "var(--forest)" }}>{drawerJob.chunk_count}</span>
+                    </div>
+                  )}
+
+                  {drawerJob.result && Object.keys(drawerJob.result).length > 0 ? (
+                    Object.entries(drawerJob.result).map(([k, v]) => (
+                      <div
+                        key={k}
+                        style={{
+                          border: "1px solid var(--line)",
+                          borderRadius: "8px",
+                          padding: "0.75rem",
+                        }}
+                      >
+                        <p
+                          style={{
+                            fontSize: "0.68rem",
+                            fontWeight: 700,
+                            color: "var(--slate-2)",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.07em",
+                            marginBottom: "0.4rem",
+                          }}
+                        >
+                          {k.replace(/_/g, " ")}
+                        </p>
+                        {Array.isArray(v) ? (
+                          <ul style={{ margin: 0, paddingLeft: "1.2rem", fontSize: "0.83rem", color: "var(--slate)", lineHeight: 1.6 }}>
+                            {(v as unknown[]).map((item, i) => (
+                              <li key={i}>{String(item)}</li>
+                            ))}
+                          </ul>
+                        ) : typeof v === "object" && v !== null ? (
+                          <pre
+                            style={{
+                              fontFamily: "var(--mono, 'JetBrains Mono', monospace)",
+                              fontSize: "0.72rem",
+                              color: "var(--slate)",
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                              margin: 0,
+                            }}
+                          >
+                            {JSON.stringify(v, null, 2)}
+                          </pre>
+                        ) : (
+                          <p style={{ fontSize: "0.83rem", color: "var(--slate)", margin: 0, lineHeight: 1.6 }}>
+                            {String(v)}
+                          </p>
+                        )}
+                      </div>
+                    ))
+                  ) : (
+                    <p style={{ textAlign: "center", color: "var(--slate-2)", fontSize: "0.85rem", marginTop: "2rem" }}>
+                      No summary data available
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </div>
         </>
       )}
+
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.35; }
+        }
+      `}</style>
     </div>
   );
 }

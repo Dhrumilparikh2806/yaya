@@ -1,3 +1,26 @@
+"""
+Abstract base class for all file processors.
+
+Subclasses implement two methods:
+  extract()   — parse the raw file into a markdown string (no LLM call).
+  summarise() — call the LLM and return a structured summary dict.
+
+The base class provides:
+  run()                  — orchestrates extract → summarise, pops internal
+                           keys (_chunk_text, _speaker_embeddings) before
+                           persisting the summary to Job.result, then returns
+                           (chunk_text, summary) to the Celery task.
+  _call_gemini_json()    — Groq text LLM → parsed JSON dict (name is legacy;
+                           uses GROQ_PROCESSING_MODEL).
+  _call_vision_markdown()— Groq Vision LLM → plain markdown string.
+  _call_gemini_vision_json() — Groq Vision LLM → parsed JSON dict.
+  _table_to_markdown()   — converts a list-of-rows table to a markdown table.
+
+Every LLM method retries up to 4 times with 30 s × attempt back-off on
+RateLimitError and 503 / 413 errors, and raises InvalidInputError immediately
+on 400 BadRequest.
+"""
+
 import base64
 import json
 import time
@@ -39,9 +62,13 @@ class BaseProcessor(ABC):
         summary = self.summarise(text, db)
         # Allow processors to override chunking text via '_chunk_text' key
         chunk_override = summary.pop("_chunk_text", None)
+        # Strip large internal keys before persisting to DB, then restore for the caller.
+        speaker_embeddings = summary.pop("_speaker_embeddings", None)
         self.job.result = json.dumps(summary)
         db.add(self.job)
         db.commit()
+        if speaker_embeddings is not None:
+            summary["_speaker_embeddings"] = speaker_embeddings
 
         chunk_text = chunk_override if chunk_override is not None else text
 

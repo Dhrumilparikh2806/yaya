@@ -17,3 +17,9 @@ frontend/dist/
 .DS_Store
 *.db
 test_*.db
+
+# Runtime / local data — not part of the codebase
+chroma/
+.claude/
+C:/tmp/
+

@@ -1,3 +1,20 @@
+"""
+Celery application instance and broker/backend configuration.
+
+Broker  — Redis (fast, ephemeral task queue).
+Backend — PostgreSQL via SQLAlchemy (durable task-result storage).
+
+task_acks_late=True    — the task message is not acknowledged until the task
+                         finishes, preventing duplicate processing if the worker
+                         crashes mid-run and Redis redelivers the message.
+worker_prefetch_multiplier=1 — each worker fetches one task at a time, which
+                               is important because process_file can be slow
+                               (minutes for large audio/video files).
+
+A daily beat schedule runs cleanup_old_uploads to delete uploaded files for
+jobs that completed or permanently failed more than 7 days ago.
+"""
+
 from celery import Celery
 from app.config import settings
 

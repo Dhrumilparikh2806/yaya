@@ -1,3 +1,14 @@
+"""
+DOCX file processor.
+
+Iterates the document body with python-docx, preserving heading hierarchy as
+markdown H1-H6 and converting tables to markdown inline.  Paragraph runs are
+joined and empty paragraphs are skipped.
+
+The LLM summary (title, document_type, key_points, risks, sections, entities)
+is produced by a single Groq call after full extraction.
+"""
+
 from docx import Document as DocxDocument
 from docx.oxml.ns import qn
 

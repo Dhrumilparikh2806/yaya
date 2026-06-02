@@ -1,3 +1,15 @@
+"""
+Pydantic-settings configuration loaded from the .env file.
+
+P0 variables (GROQ_API_KEY, SECRET_KEY, DATABASE_URL, REDIS_URL) are validated
+in model_post_init and cause an immediate sys.exit(1) if missing or still set to
+placeholder values, so misconfiguration is caught at startup rather than at
+the first API call.
+
+GEMINI_API_KEY is optional and only required for the /v1/query/stream SSE
+endpoint.  All other LLM work uses Groq.
+"""
+
 import sys
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -38,6 +50,12 @@ class Settings(BaseSettings):
     # Kept for ADK agent and backward compat
     GEMINI_MODEL: str = "gemini-2.0-flash"
     GEMINI_EMBEDDING_MODEL: str = "models/text-embedding-004"
+
+    WHISPER_MODEL: str = "whisper-large-v3"
+    WHISPER_LANGUAGE: str = ""   # empty = auto-detect; set to ISO-639-1 code ("en","hi","es"…) to force
+    VIDEO_FRAME_INTERVAL: int = 60
+    DIARIZATION_THRESHOLD: float = 0.4
+    MAX_AUDIO_CHUNK_MB: int = 20
 
     CHUNK_SIZE: int = 600
     CHILD_CHUNK_SIZE: int = 150

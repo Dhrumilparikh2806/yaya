@@ -1,3 +1,19 @@
+"""
+SQLModel ORM table definitions and the SQLAlchemy engine singleton.
+
+Tables
+------
+User         — accounts (email, hashed password, role, active flag).
+Job          — file processing jobs with full status/step/retry/error tracking.
+UsageLog     — one row per LLM/Whisper/embed API call (tokens, latency, model).
+QueryHistory — one row per RAG query (answer, citations, RAGAS scores).
+
+Engine
+------
+get_engine() returns a module-level singleton so the connection pool is shared
+across all Celery tasks and FastAPI requests in the same process.
+"""
+
 import enum
 import uuid
 from datetime import datetime
